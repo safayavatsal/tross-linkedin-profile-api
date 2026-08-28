@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Tross LinkedIn Profile API</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 720px; margin: 3rem auto; padding: 0 1.5rem; line-height: 1.5; }
+  h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+  p.sub { color: #888; margin-top: 0; }
+  form { display: flex; gap: 0.5rem; margin: 1.5rem 0; }
+  input[type="url"] { flex: 1; padding: 0.6rem 0.8rem; font-size: 1rem; border: 1px solid #999; border-radius: 6px; }
+  button { padding: 0.6rem 1.2rem; font-size: 1rem; border: none; border-radius: 6px; background: #0a66c2; color: #fff; cursor: pointer; }
+  button:disabled { opacity: 0.6; cursor: default; }
+  pre { background: rgba(127,127,127,0.12); padding: 1rem; border-radius: 8px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+  .status { font-size: 0.85rem; margin-bottom: 0.5rem; }
+  .status.ok { color: #1a7f37; }
+  .status.err { color: #c53030; }
+  code { background: rgba(127,127,127,0.15); padding: 0.1rem 0.35rem; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <h1>Tross LinkedIn Profile API</h1>
+  <p class="sub">Enter a LinkedIn profile URL. Extraction is a stub (see README) — any <code>linkedin.com/in/&lt;slug&gt;</code> URL returns realistic sample data.</p>
+
+  <form id="form">
+    <input id="url" type="url" required placeholder="https://www.linkedin.com/in/example-profile" value="https://www.linkedin.com/in/example-profile" />
+    <button id="submit" type="submit">Fetch</button>
+  </form>
+
+  <div id="status" class="status"></div>
+  <pre id="result" hidden></pre>
+
+  <script>
+    const form = document.getElementById("form");
+    const urlInput = document.getElementById("url");
+    const submitBtn = document.getElementById("submit");
+    const statusEl = document.getElementById("status");
+    const resultEl = document.getElementById("result");
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      submitBtn.disabled = true;
+      statusEl.className = "status";
+      statusEl.textContent = "Fetching...";
+      resultEl.hidden = true;
+
+      try {
+        const res = await fetch("/api/v1/profile", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ linkedin_url: urlInput.value }),
+        });
+        const body = await res.json();
+
+        statusEl.className = res.ok ? "status ok" : "status err";
+        statusEl.textContent = `HTTP ${res.status}` + (body.meta ? ` — source: ${body.meta.source}` : "");
+        resultEl.textContent = JSON.stringify(body, null, 2);
+        resultEl.hidden = false;
+      } catch (err) {
+        statusEl.className = "status err";
+        statusEl.textContent = "Request failed: " + err.message;
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

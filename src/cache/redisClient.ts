@@ -1,0 +1,6 @@
+import { Redis } from "ioredis";
+import { config } from "../config/index.js";
+
+export const redis = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
+
+redis.on("error", (err: Error) => console.error(`[redis] connection error: ${err.message}`));
