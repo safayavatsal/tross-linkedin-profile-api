@@ -106,4 +106,17 @@ describe("linkedinExtractor", () => {
       UpstreamRateLimitedError,
     );
   });
+
+  it("maps a redirect-loop network failure (LinkedIn's edge block) to UpstreamRateLimitedError", async () => {
+    global.fetch = vi.fn().mockRejectedValue(
+      Object.assign(new TypeError("fetch failed"), { cause: new Error("redirect count exceeded") }),
+    ) as unknown as typeof fetch;
+
+    const { linkedinExtractor } = await import("../../src/extraction/implementation/linkedinExtractor.js");
+    const { UpstreamRateLimitedError } = await import("../../src/errors/errorTypes.js");
+
+    await expect(linkedinExtractor.fetch("https://www.linkedin.com/in/blocked")).rejects.toBeInstanceOf(
+      UpstreamRateLimitedError,
+    );
+  });
 });

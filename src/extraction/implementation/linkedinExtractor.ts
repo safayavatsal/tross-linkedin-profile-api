@@ -5,6 +5,7 @@ import {
   UpstreamRateLimitedError,
   UnknownExtractionError,
 } from "../../errors/errorTypes.js";
+import { isRedirectBlock } from "./redirectBlock.js";
 import type { ProfileExtractor } from "../ProfileExtractor.interface.js";
 import type { RawProfileData } from "../../types/profile.types.js";
 
@@ -44,19 +45,27 @@ export const linkedinExtractor: ProfileExtractor = {
     }
 
     const publicIdentifier = publicIdentifierFromUrl(normalizedUrl);
-    const res = await fetch(
-      `https://www.linkedin.com/voyager/api/identity/profiles/${publicIdentifier}/profileView`,
-      {
-        headers: {
-          cookie: `li_at=${config.linkedinLiAt}; JSESSIONID="${config.linkedinJsessionid}"`,
-          "csrf-token": config.linkedinJsessionid,
-          "x-restli-protocol-version": "2.0.0",
-          accept: "application/json",
-          "user-agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    let res: Response;
+    try {
+      res = await fetch(
+        `https://www.linkedin.com/voyager/api/identity/profiles/${publicIdentifier}/profileView`,
+        {
+          headers: {
+            cookie: `li_at=${config.linkedinLiAt}; JSESSIONID="${config.linkedinJsessionid}"`,
+            "csrf-token": config.linkedinJsessionid,
+            "x-restli-protocol-version": "2.0.0",
+            accept: "application/json",
+            "user-agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          },
         },
-      },
-    );
+      );
+    } catch (err) {
+      if (isRedirectBlock(err)) {
+        throw new UpstreamRateLimitedError("LinkedIn blocked the request with an infinite redirect (edge-level automated-traffic block)");
+      }
+      throw new UnknownExtractionError(`Network error calling Voyager API: ${(err as Error).message}`);
+    }
 
     if (res.status === 404) throw new ProfileNotFoundError();
     if (res.status === 401 || res.status === 403 || res.status === 999) {
