@@ -8,5 +8,11 @@ if (!url) {
   process.exit(1);
 }
 
-const data = await playwrightExtractor.fetch(url);
-console.log(JSON.stringify(data, null, 2));
+try {
+  const data = await playwrightExtractor.fetch(url);
+  console.log(JSON.stringify(data, null, 2));
+} catch (err) {
+  const { code, httpStatus, message } = err as { code?: string; httpStatus?: number; message: string };
+  console.error(`Extraction failed: ${code ?? "ERROR"} (${httpStatus ?? "?"}) — ${message}`);
+  process.exit(1);
+}

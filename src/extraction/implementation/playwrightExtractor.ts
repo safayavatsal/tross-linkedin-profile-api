@@ -79,7 +79,17 @@ export const playwrightExtractor: ProfileExtractor = {
       ]);
 
       const page = await context.newPage();
-      const res = await page.goto(normalizedUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      let res;
+      try {
+        res = await page.goto(normalizedUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      } catch (err) {
+        // ERR_TOO_MANY_REDIRECTS is LinkedIn's confirmed edge-level block for this
+        // request pattern (see README "Extraction layer") — same shape as a 429.
+        if ((err as Error).message.includes("ERR_TOO_MANY_REDIRECTS")) {
+          throw new UpstreamRateLimitedError("LinkedIn blocked the request with an infinite redirect (edge-level automated-traffic block)");
+        }
+        throw new UnknownExtractionError(`Navigation failed: ${(err as Error).message.split("\n")[0]}`);
+      }
       await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
 
       const finalUrl = page.url();
