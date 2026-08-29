@@ -6,15 +6,22 @@ import {
   UnknownExtractionError,
 } from "../../errors/errorTypes.js";
 import { isRedirectBlock } from "./redirectBlock.js";
+import { msUntilAllowed, recordAttempt, recordBlock } from "./linkedinPacing.js";
+import { topCardUrl } from "./linkedinDashEndpoints.js";
 import type { ProfileExtractor } from "../ProfileExtractor.interface.js";
 import type { RawProfileData } from "../../types/profile.types.js";
 
-// Real extraction via LinkedIn's internal "Voyager" web API — the same one
-// linkedin.com's own frontend calls once you're logged in. Requires your own
-// session cookies (LINKEDIN_LI_AT + LINKEDIN_JSESSIONID, see README). This is
-// unofficial/reverse-engineered (docs/08_Risk_Limitations.md) — LinkedIn can
-// change this shape or rate-limit/flag the account at any time.
-type VoyagerEntity = Record<string, unknown> & { $type?: string };
+// Real extraction via LinkedIn's internal "Voyager" web API. The classic
+// `identity/profiles/{id}/profileView` REST endpoint is dead (410 Gone, confirmed
+// during this build). This targets its still-alive sibling instead: the Voyager
+// "Dash" layer's decorated top-card finder — found via Wayfinder ticket T2
+// (verified from cullenwatson/StaffSpy's source, not just README claims) and not
+// yet confirmed live against our own account (that's ticket T7). Unofficial/
+// reverse-engineered (docs/08_Risk_Limitations.md) — can change or get
+// rate-limited/flagged at any time. Only returns top-card data (name, headline,
+// location, photo) — not experience/education/skills, which live behind
+// separate, still-unverified GraphQL calls (see T2-findings.md).
+type DashEntity = Record<string, unknown>;
 
 function publicIdentifierFromUrl(normalizedUrl: string): string {
   return new URL(normalizedUrl).pathname.replace(/^\/in\//, "").replace(/\/$/, "");
@@ -27,15 +34,30 @@ function pickImageUrl(picture: unknown): string | null {
   return p.rootUrl + largest.fileIdentifyingUrlPathSegment;
 }
 
-function formatDuration(timePeriod: unknown): string {
-  const tp = timePeriod as { startDate?: { year?: number }; endDate?: { year?: number } } | undefined;
-  const start = tp?.startDate?.year ? String(tp.startDate.year) : "?";
-  const end = tp?.endDate?.year ? String(tp.endDate.year) : "Present";
-  return `${start} - ${end}`;
-}
+// Field names are our best-effort reading of typical Voyager/Dash naming
+// conventions (mirrors the old Profile entity) — unverified until T7's live
+// test. If LinkedIn's actual TopCardComplete shape differs, this throws with
+// the real top-level keys so T7 can fix the mapping from real evidence.
+function extractTopCard(elements: DashEntity[]): RawProfileData {
+  const e = elements[0];
+  if (!e) throw new ProfilePrivateOrUnreachableError();
 
-function byType(included: VoyagerEntity[], suffix: string): VoyagerEntity[] {
-  return included.filter((e) => typeof e.$type === "string" && e.$type.endsWith(suffix));
+  const firstName = (e.firstName as string) ?? "";
+  const lastName = (e.lastName as string) ?? "";
+  const name = `${firstName} ${lastName}`.trim() || (e.name as string) || "";
+  if (!name) {
+    throw new UnknownExtractionError(
+      `Unexpected TopCardComplete shape, no name field found. Top-level keys: ${Object.keys(e).join(", ")}`,
+    );
+  }
+
+  return {
+    name,
+    headline: (e.headline as string) ?? null,
+    location: (e.locationName as string) ?? (e.geoLocationName as string) ?? null,
+    about: null,
+    profilePhotoUrl: pickImageUrl(e.profilePicture),
+  };
 }
 
 export const linkedinExtractor: ProfileExtractor = {
@@ -44,17 +66,23 @@ export const linkedinExtractor: ProfileExtractor = {
       throw new UnknownExtractionError("Real extraction not configured: set LINKEDIN_LI_AT and LINKEDIN_JSESSIONID");
     }
 
+    const wait = msUntilAllowed();
+    if (wait > 0) {
+      throw new UpstreamRateLimitedError(`Self-imposed pacing: wait ${Math.ceil(wait / 1000)}s before the next LinkedIn call`);
+    }
+    recordAttempt();
+
     const publicIdentifier = publicIdentifierFromUrl(normalizedUrl);
     let res: Response;
     try {
       res = await fetch(
-        `https://www.linkedin.com/voyager/api/identity/profiles/${publicIdentifier}/profileView`,
+        topCardUrl(publicIdentifier),
         {
           headers: {
             cookie: `li_at=${config.linkedinLiAt}; JSESSIONID="${config.linkedinJsessionid}"`,
             "csrf-token": config.linkedinJsessionid,
             "x-restli-protocol-version": "2.0.0",
-            accept: "application/json",
+            accept: "application/vnd.linkedin.normalized+json+2.1",
             "user-agent":
               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
           },
@@ -62,6 +90,7 @@ export const linkedinExtractor: ProfileExtractor = {
       );
     } catch (err) {
       if (isRedirectBlock(err)) {
+        recordBlock();
         throw new UpstreamRateLimitedError("LinkedIn blocked the request with an infinite redirect (edge-level automated-traffic block)");
       }
       throw new UnknownExtractionError(`Network error calling Voyager API: ${(err as Error).message}`);
@@ -69,49 +98,12 @@ export const linkedinExtractor: ProfileExtractor = {
 
     if (res.status === 404) throw new ProfileNotFoundError();
     if (res.status === 401 || res.status === 403 || res.status === 999) {
+      recordBlock();
       throw new UpstreamRateLimitedError("LinkedIn rejected the request (blocked, rate-limited, or session expired)");
     }
     if (!res.ok) throw new UnknownExtractionError(`LinkedIn returned HTTP ${res.status}`);
 
-    const body = (await res.json()) as { included?: VoyagerEntity[] };
-    const included = body.included ?? [];
-    const profile = byType(included, "identity.profile.Profile")[0];
-    if (!profile) throw new ProfilePrivateOrUnreachableError();
-
-    const positions = byType(included, "identity.profile.Position");
-    const educations = byType(included, "identity.profile.Education");
-    const skills = byType(included, "identity.profile.Skill");
-    const certifications = byType(included, "identity.profile.Certification");
-    const languages = byType(included, "identity.profile.Language");
-
-    return {
-      name: `${(profile.firstName as string) ?? ""} ${(profile.lastName as string) ?? ""}`.trim(),
-      headline: (profile.headline as string) ?? null,
-      location: (profile.locationName as string) ?? null,
-      about: (profile.summary as string) ?? null,
-      experience: positions.map((p) => ({
-        title: (p.title as string) ?? "",
-        company: (p.companyName as string) ?? "",
-        duration: formatDuration(p.timePeriod),
-        location: (p.locationName as string) ?? null,
-        description: (p.description as string) ?? null,
-      })),
-      education: educations.map((e) => ({
-        school: (e.schoolName as string) ?? "",
-        degree: (e.degreeName as string) ?? null,
-        duration: formatDuration(e.timePeriod),
-      })),
-      skills: skills.map((s) => (s.name as string) ?? "").filter(Boolean),
-      certifications: certifications.map((c) => ({
-        name: (c.name as string) ?? "",
-        issuer: (c.authority as string) ?? null,
-        date: (c.timePeriod as { startDate?: { year?: number } } | undefined)?.startDate?.year
-          ? String((c.timePeriod as { startDate: { year: number } }).startDate.year)
-          : null,
-      })),
-      languages: languages.map((l) => (l.name as string) ?? "").filter(Boolean),
-      profilePhotoUrl: pickImageUrl(profile.profilePicture),
-      bannerUrl: pickImageUrl(profile.backgroundPicture),
-    };
+    const body = (await res.json()) as { elements?: DashEntity[] };
+    return extractTopCard(body.elements ?? []);
   },
 };

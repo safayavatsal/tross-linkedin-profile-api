@@ -14,7 +14,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
-    "extract:local": "tsx scripts/tryPlaywrightExtractor.ts"
+    "extract:local": "tsx scripts/tryPlaywrightExtractor.ts",
+    "probe:linkedin": "tsx scripts/probeLinkedinDashSections.ts"
   },
   "dependencies": {
     "@fastify/rate-limit": "^10.2.1",
