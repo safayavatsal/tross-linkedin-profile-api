@@ -31,6 +31,8 @@ The challenge explicitly asks for "known limitations" in the README. Most candid
 - Single-region, single-instance deployment — no horizontal scaling implemented (though the architecture supports adding it later; see `03_Architecture.md`, Section 4).
 - No persistent database — Redis cache is not intended as durable long-term storage; a cache flush means re-fetching on next request.
 - Minimal authentication/authorization on the API itself (not required by the challenge, but would be a next step for a production version).
+- Render's free tier spins the instance down after a period of inactivity; the first request afterward pays a cold-start delay before responding. Not fixable without a paid plan.
+- Experience/education/skills/certifications/languages are not yet populated by either deployed extraction path — see `README.md` "Extraction layer" and "Known limitations" for the current state and what's blocking it (unverified candidate endpoints, not a design gap).
 
 ## 6. What Would Change for a "Real" Production Version
 
