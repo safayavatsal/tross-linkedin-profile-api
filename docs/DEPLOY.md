@@ -28,7 +28,7 @@ Set these in the Web Service's **Environment** tab:
 | `EXTRACTION_MAX_CALLS_PER_MINUTE` | No | Defaults to `10`. |
 | `RATE_LIMIT_MAX` | No | Defaults to `60`. |
 | `RATE_LIMIT_WINDOW_MS` | No | Defaults to `60000`. |
-| `LINKEDIN_LI_AT` | No | Your LinkedIn session cookie. Unset -> mock extractor. See README "Real extraction setup". |
+| `LINKEDIN_LI_AT` | No | Your LinkedIn session cookie. Unset, or the authenticated call fails -> falls back to `publicExtractor` (anonymous, no login). See README "Real extraction setup". |
 | `LINKEDIN_JSESSIONID` | No | Your LinkedIn CSRF/session cookie, paired with `LINKEDIN_LI_AT`. |
 
 All optional variables have sensible defaults baked into `src/config/index.ts` and only need to be set if you want to override them.
