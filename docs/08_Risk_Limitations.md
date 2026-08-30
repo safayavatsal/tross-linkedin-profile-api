@@ -20,6 +20,11 @@ The challenge explicitly asks for "known limitations" in the README. Most candid
 - This service is designed for single-profile, on-demand lookups — not bulk/parallel scraping. Caching and internal throttling reflect this design choice.
 - Using a single LinkedIn account server-side means the extraction layer has a shared, finite rate budget across all API callers.
 
+## 3a. Credential Lifetime & How This Is Meant to Be Evaluated
+
+- Per the brief ("you may use your own LinkedIn credentials in the backend"), the authenticated extraction path runs on **our** `li_at`/`JSESSIONID`, held only in the deployment's environment variables — never in the repo, never supplied by whoever evaluates the public URL. `li_at` is a long-lived cookie by design (~1 year), not something expected to rotate on every login; but if it does expire, get revoked, or the account gets flagged between submission and whenever this is actually evaluated, the authenticated path fails closed into the no-login `publicExtractor` (see `README.md` "Real (authenticated) extraction setup") rather than breaking the deployed service.
+- Anyone who wants to test with a live, guaranteed-fresh session instead of relying on our deployed credentials can clone the repo and supply their own `li_at`/`JSESSIONID` locally — documented in the README setup steps.
+
 ## 4. Legal / Terms-of-Service Considerations
 
 - LinkedIn's Terms of Service prohibit automated scraping/access outside their official API and partner program.
@@ -32,7 +37,7 @@ The challenge explicitly asks for "known limitations" in the README. Most candid
 - No persistent database — Redis cache is not intended as durable long-term storage; a cache flush means re-fetching on next request.
 - Minimal authentication/authorization on the API itself (not required by the challenge, but would be a next step for a production version).
 - Render's free tier spins the instance down after a period of inactivity; the first request afterward pays a cold-start delay before responding. Not fixable without a paid plan.
-- Experience/education/skills/certifications/languages are not yet populated by either deployed extraction path — see `README.md` "Extraction layer" and "Known limitations" for the current state and what's blocking it (unverified candidate endpoints, not a design gap).
+- Experience/education/skills/certifications/languages are implemented (sourced field mappings, fixture-tested) but never verified against a live LinkedIn response, since the account used for this build has stayed blocked throughout — see `README.md` "Extraction layer" and "Known limitations" for the current state.
 
 ## 6. What Would Change for a "Real" Production Version
 
