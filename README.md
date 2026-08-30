@@ -9,7 +9,7 @@ A hosted HTTP API that accepts a LinkedIn profile URL and returns structured JSO
 - [Quick start](#quick-start)
 - [API](#api)
 - [Approach](#approach)
-- [Extraction layer (stub)](#extraction-layer-stub)
+- [Extraction layer](#extraction-layer)
 - [Project structure](#project-structure)
 - [Configuration](#configuration)
 - [Testing](#testing)
@@ -24,6 +24,8 @@ A hosted HTTP API that accepts a LinkedIn profile URL and returns structured JSO
 docker-compose -f docker/compose/docker-compose.yml up --build
 curl http://localhost:3000/health
 ```
+
+**Stuck on `localhost:3000` after `docker compose up`, even though `docker ps` shows everything running/healthy?** See [Troubleshooting: Docker reports healthy but `localhost:3000` won't load (macOS)](#troubleshooting-docker-reports-healthy-but-localhost3000-wont-load-macos) below.
 
 ### Option B — local Node
 
@@ -46,6 +48,43 @@ curl -X POST http://localhost:3000/api/v1/profile \
 The first call fetches through the (mock) extraction pipeline (`meta.source: "live"`); repeat the same URL and it's served from Redis (`meta.source: "cache"`).
 
 There's also a minimal browser UI at [`http://localhost:3000`](http://localhost:3000) — a single form that POSTs to `/api/v1/profile` and prints the raw JSON response (`public/index.html`, served by `src/api/routes/ui.routes.ts`, no framework or build step).
+
+### Troubleshooting: Docker reports healthy but `localhost:3000` won't load (macOS)
+
+**Symptom:** `docker compose ps` shows both containers `Up`/`healthy`, `docker compose logs app` shows `Server listening at http://127.0.0.1:3000`, but the browser hangs indefinitely on `localhost:3000` and `curl http://127.0.0.1:3000/health` fails outright with:
+
+```
+curl: (7) Failed to connect to 127.0.0.1 port 3000 after 0 ms: Couldn't connect to server
+```
+
+**This is not a bug in this project.** It's a macOS networking issue, seen in the wild while testing this exact setup: a VPN or corporate security client (Zscaler, Cisco AnyConnect, and similar tools are known to do this) has hijacked the `lo0` loopback interface and removed the standard `127.0.0.1` address, replacing it with something like `10.10.10.1`. Every app on the machine — not just this one — becomes unreachable at `localhost`/`127.0.0.1` until it's fixed, because the failure happens at the OS socket layer, before the connection ever reaches Docker's port mapping.
+
+**Diagnose it:**
+
+1. Confirm the app really is listening and Redis is reachable (rules out an app-level hang):
+   ```bash
+   docker compose -f docker/compose/docker-compose.yml logs app   # look for "Server listening at http://127.0.0.1:3000"
+   docker compose -f docker/compose/docker-compose.yml exec redis redis-cli ping   # expect PONG
+   ```
+2. Confirm Docker's port mapping is correct (rules out a Docker-config issue):
+   ```bash
+   docker ps   # look for 0.0.0.0:3000->3000/tcp in the app container's PORTS column
+   ```
+3. Check whether `127.0.0.1` actually exists on the loopback interface — this is the tell:
+   ```bash
+   ifconfig lo0 | grep "inet "
+   ```
+   If you see something like `inet 10.10.10.1 netmask 0xffffffff` and **no** `127.0.0.1` line at all, that confirms it.
+
+**Fix it:**
+
+```bash
+sudo ifconfig lo0 alias 127.0.0.1 up
+```
+
+This adds `127.0.0.1` back as an additional address on `lo0` alongside whatever the VPN added — it doesn't remove or fight the VPN's own address, so it's safe to run. Verify with `ifconfig lo0 | grep "inet "` (you should now see both addresses) and `curl http://127.0.0.1:3000/health`.
+
+**Not permanent** — a VPN reconnect or a reboot can re-apply the hijack, so you may need to re-run the command after either. If this happens repeatedly on a work machine, it's worth flagging to IT — the VPN client's behavior is the root cause, not something any app can fix on its own.
 
 ## API
 
