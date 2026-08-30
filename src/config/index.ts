@@ -24,7 +24,7 @@ export const config = {
   rateLimitWindowMs: num("RATE_LIMIT_WINDOW_MS", 60000),
 
   // Real extraction (Voyager API), see src/extraction/implementation/linkedinExtractor.ts.
-  // Both unset -> worker falls back to the mock extractor.
+  // Both unset, or the authenticated call fails -> worker.ts falls back to publicExtractor.
   linkedinLiAt: process.env.LINKEDIN_LI_AT || null,
   linkedinJsessionid: process.env.LINKEDIN_JSESSIONID || null,
 } as const;
