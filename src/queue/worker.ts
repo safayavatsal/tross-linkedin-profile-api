@@ -3,14 +3,8 @@ import { redis } from "../cache/redisClient.js";
 import { config } from "../config/index.js";
 import { linkedinExtractor } from "../extraction/implementation/linkedinExtractor.js";
 import { publicExtractor } from "../extraction/implementation/publicExtractor.js";
-import {
-  AppError,
-  InvalidUrlError,
-  ProfileNotFoundError,
-  ProfilePrivateOrUnreachableError,
-  ExtractionTimeoutError,
-  UnknownExtractionError,
-} from "../errors/errorTypes.js";
+import { AppError, ExtractionTimeoutError, UnknownExtractionError } from "../errors/errorTypes.js";
+import { isNonRetryable } from "./isNonRetryable.js";
 import type { RawProfileData } from "../types/profile.types.js";
 
 const hasLinkedinCredentials = Boolean(config.linkedinLiAt && config.linkedinJsessionid);
@@ -23,8 +17,16 @@ async function extractProfile(normalizedUrl: string): Promise<RawProfileData> {
   if (hasLinkedinCredentials) {
     try {
       return await linkedinExtractor.fetch(normalizedUrl);
-    } catch (err) {
-      console.warn(`[worker] linkedinExtractor failed, falling back to publicExtractor: ${(err as Error)?.message}`);
+    } catch (authErr) {
+      console.warn(`[worker] linkedinExtractor failed, falling back to publicExtractor: ${(authErr as Error)?.message}`);
+      try {
+        return await publicExtractor.fetch(normalizedUrl);
+      } catch {
+        // Both paths failed: the authenticated error is the more accurate signal
+        // (e.g. an actual LinkedIn block) than the anonymous fallback's generic
+        // "unreachable" — surface that one instead of masking it.
+        throw authErr;
+      }
     }
   }
   return publicExtractor.fetch(normalizedUrl);
@@ -44,14 +46,6 @@ async function fetchWithTimeout(normalizedUrl: string): Promise<RawProfileData> 
   } finally {
     clearTimeout(timer);
   }
-}
-
-function isNonRetryable(err: AppError): boolean {
-  return (
-    err instanceof InvalidUrlError ||
-    err instanceof ProfileNotFoundError ||
-    err instanceof ProfilePrivateOrUnreachableError
-  );
 }
 
 export const worker = new Worker<ExtractionJobData, RawProfileData>(

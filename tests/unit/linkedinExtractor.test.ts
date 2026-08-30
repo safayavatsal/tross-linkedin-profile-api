@@ -100,6 +100,67 @@ describe("linkedinExtractor", () => {
     );
   });
 
+  it("fetches sections/bio when the top-card response contains a profile urn, degrading gracefully on partial failure", async () => {
+    const TOPCARD_WITH_URN = {
+      elements: [{ ...TOPCARD_FIXTURE.elements[0], entityUrn: "urn:li:fsd_profile:ACoAAB123" }],
+    };
+    const experienceJson = {
+      data: {
+        identityDashProfileComponentsBySectionType: {
+          elements: [
+            {
+              components: {
+                pagedListComponent: {
+                  components: {
+                    elements: [
+                      {
+                        components: {
+                          entityComponent: {
+                            titleV2: { text: { text: "Senior Engineer" } },
+                            subtitle: { text: "Acme Corp · Full-time" },
+                            caption: { text: "Jan 2020 - Present" },
+                            metadata: { text: "Remote" },
+                          },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          ],
+        },
+      },
+    };
+
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes("voyagerIdentityDashProfiles?")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => TOPCARD_WITH_URN });
+      }
+      if (url.includes("sectionType:experience")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => experienceJson });
+      }
+      // Every other section/bio call fails — should be omitted, not fail the whole request.
+      return Promise.resolve({ ok: false, status: 500 });
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const { linkedinExtractor } = await import("../../src/extraction/implementation/linkedinExtractor.js");
+    const raw = await linkedinExtractor.fetch("https://www.linkedin.com/in/jane-doe");
+
+    expect(raw.name).toBe("Jane Doe");
+    expect(raw.experience).toEqual([
+      { title: "Senior Engineer", company: "Acme Corp · Full-time", duration: "Jan 2020 - Present", location: "Remote", description: null },
+    ]);
+    expect(raw.education).toBeUndefined();
+    expect(raw.skills).toBeUndefined();
+    expect(raw.certifications).toBeUndefined();
+    expect(raw.languages).toBeUndefined();
+    expect(raw.about).toBeNull();
+    // top-card + bio + experience + education + skills + certifications + languages = 7 calls
+    expect(fetchMock).toHaveBeenCalledTimes(7);
+  });
+
   it("self-paces: a second call before the minimum interval is rejected without hitting the network", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

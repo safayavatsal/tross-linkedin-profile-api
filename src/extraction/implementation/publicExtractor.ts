@@ -32,6 +32,10 @@ export const publicExtractor: ProfileExtractor = {
           "user-agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
           accept: "text/html",
+          "accept-language": "en-US,en;q=0.9",
+          "sec-fetch-site": "none",
+          "sec-fetch-mode": "navigate",
+          "sec-fetch-dest": "document",
         },
       });
     } catch (err) {
