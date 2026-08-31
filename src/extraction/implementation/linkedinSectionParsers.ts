@@ -36,6 +36,10 @@ export function parseAbout(parsed: FlightParsed): string | null {
   return extractAboutText(parsed);
 }
 
+function descriptionKey(entry: { title: string; dates: string | null }): string {
+  return `${entry.title}|${entry.dates ?? ""}`;
+}
+
 // LinkedIn groups promotions/multiple roles at one company under a single header in its
 // UI. In the flattened Flight-protocol stream that surfaces as: a "header" entry whose
 // title is the *company* name and whose subtitle is "Employment type · total duration"
@@ -45,11 +49,23 @@ export function parseAbout(parsed: FlightParsed): string | null {
 // the most recent header's company name forward onto each subtitle-less position that
 // follows it, and drops the header itself (it isn't a real job). A genuine single-position
 // entry (has its own non-employment-type subtitle) resets the carried-forward company.
-export function parseExperience(parsed: FlightParsed): RawExperienceEntry[] {
+//
+// `full` is the details-page parse (see fetchDetailsPage) — the complete entry list, but
+// its own description text can't be trusted (page chrome interleaved with the real list
+// breaks the positional description-to-entry match). `descriptionsSource` is the rsc-action
+// preview parse — capped in length, but clean, so its descriptions are matched back onto
+// `full`'s entries by (title, dates) instead.
+export function parseExperience(full: FlightParsed, descriptionsSource: FlightParsed | null): RawExperienceEntry[] {
+  const descriptionByKey = new Map(
+    (descriptionsSource ? extractCardEntries(descriptionsSource) : [])
+      .filter((entry) => entry.description)
+      .map((entry) => [descriptionKey(entry), entry.description as string]),
+  );
+
   const results: RawExperienceEntry[] = [];
   let groupCompany: string | null = null;
 
-  for (const entry of extractCardEntries(parsed)) {
+  for (const entry of extractCardEntries(full)) {
     if (!entry.title) continue;
 
     if (isGroupHeaderSubtitle(entry.subtitle)) {
@@ -65,7 +81,7 @@ export function parseExperience(parsed: FlightParsed): RawExperienceEntry[] {
       company,
       duration: entry.dates ?? "",
       location: entry.location,
-      description: entry.description,
+      description: descriptionByKey.get(descriptionKey(entry)) ?? null,
     });
   }
 

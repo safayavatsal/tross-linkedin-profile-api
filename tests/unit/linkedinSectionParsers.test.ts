@@ -35,14 +35,14 @@ describe("parseExperience", () => {
       `4:["$","$La",null,{"textProps":{"children":["Bengaluru, India"]}}]`,
     ]);
 
-    expect(parseExperience(parsed)).toEqual([
+    expect(parseExperience(parsed, parsed)).toEqual([
       { title: "Senior Engineer", company: "Acme Corp", duration: "Jan 2020 - Present · 3 yrs 4 mos", location: "Bengaluru, India", description: null },
     ]);
   });
 
   it("keeps the whole subtitle as company when there's no ' · ' separator", () => {
     const parsed = flight([`1:["$","p",null,{"className":"c2d1c236","children":["Founding Team"]}]`, `2:["$","p",null,{"className":"_61558a10","children":["WarpVerse X"]}]`]);
-    expect(parseExperience(parsed)[0].company).toBe("WarpVerse X");
+    expect(parseExperience(parsed, parsed)[0].company).toBe("WarpVerse X");
   });
 
   it("attributes a grouped multi-position header's title to each nested position as company, and drops the header itself", () => {
@@ -58,7 +58,7 @@ describe("parseExperience", () => {
       `6:["$","$La",null,{"textProps":{"children":["Nov 2024 - Present · 1 yr 10 mos"]}}]`,
     ]);
 
-    expect(parseExperience(parsed)).toEqual([
+    expect(parseExperience(parsed, parsed)).toEqual([
       { title: "FDE", company: "Deuex Solutions Pvt. Ltd.", duration: "Feb 2025 - Present · 1 yr 7 mos", location: null, description: null },
       { title: "DevOps Engineer", company: "Deuex Solutions Pvt. Ltd.", duration: "Nov 2024 - Present · 1 yr 10 mos", location: null, description: null },
     ]);
@@ -75,9 +75,38 @@ describe("parseExperience", () => {
       `6:["$","p",null,{"className":"_61558a10","children":["The Startup Story · Full-time"]}]`,
     ]);
 
-    const result = parseExperience(parsed);
+    const result = parseExperience(parsed, parsed);
     expect(result[0]).toMatchObject({ title: "FDE", company: "Deuex Solutions Pvt. Ltd." });
     expect(result[1]).toMatchObject({ title: "Content Creator", company: "The Startup Story" });
+  });
+
+  // Real shape (T14): the details page (fetchDetailsPage) has the complete entry list but
+  // unreliable descriptions (page chrome breaks positional matching); the rsc-action preview
+  // is capped in length but has clean descriptions. parseExperience takes entries from `full`
+  // and descriptions from `descriptionsSource`, matched by (title, dates) — not by position.
+  it("sources entries from the full list and descriptions from the separate preview, matched by title+dates", () => {
+    const full = flight([
+      `1:["$","p",null,{"className":"c2d1c236","children":["Senior Engineer"]}]`,
+      `2:["$","p",null,{"className":"_61558a10","children":["Acme Corp · Full-time"]}]`,
+      `3:["$","p",null,{"className":"c2d1c236","children":["Junior Engineer"]}]`,
+      `4:["$","p",null,{"className":"_61558a10","children":["Acme Corp · Full-time"]}]`,
+    ]);
+    const descriptionsSource = flight([
+      `b:I["${EXPANDABLE_HASH}",[],"default"]`,
+      `1:["$","$Lb",null,{"textProps":{"children":["Led the platform team."]}}]`,
+      `2:["$","p",null,{"className":"c2d1c236","children":["Senior Engineer"]}]`,
+    ]);
+
+    const result = parseExperience(full, descriptionsSource);
+    expect(result).toEqual([
+      { title: "Senior Engineer", company: "Acme Corp", duration: "", location: null, description: "Led the platform team." },
+      { title: "Junior Engineer", company: "Acme Corp", duration: "", location: null, description: null },
+    ]);
+  });
+
+  it("treats a null descriptions source as no descriptions available, without throwing", () => {
+    const full = flight([`1:["$","p",null,{"className":"c2d1c236","children":["Senior Engineer"]}]`]);
+    expect(parseExperience(full, null)[0].description).toBeNull();
   });
 });
 
