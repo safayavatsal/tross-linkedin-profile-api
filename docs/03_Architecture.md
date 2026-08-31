@@ -46,3 +46,9 @@ See `04_Architecture_Diagram.md` for visual diagrams of this topology.
 - It directly maps to the challenge's own requirements (public HTTPS, structured JSON, README with approach/limitations).
 - It matches the candidate's existing production experience (Node/TS, queue-based async processing, containerized deployment, Redis caching) — the architecture is a natural extension of real prior work, not a stack picked to impress.
 - It scopes cleanly to 3 days: every component listed has a fast path to "working," with scaling/extension notes documented rather than built, which is itself a mark of judgment under a deadline.
+
+## 7. Deviations from the Design Docs
+
+- Added `src/services/profileService.ts` (not in `05_Folder_Structure.md`) as the orchestration layer between the controller and cache/queue/formatter — the LLD describes this orchestration (§9, "Sequence: Single Request") but doesn't name a file for it.
+- The BullMQ↔Fastify error boundary: BullMQ only reliably preserves `Error.message` (not custom error classes) across the queue. The worker encodes `{ code, message }` as JSON in the thrown message; `runExtractionJob` in `src/queue/queue.ts` decodes it back into the matching `AppError` subclass. This is internal plumbing, not a contract change — same doc'd error matrix, same public shapes.
+- Client-facing rate limiting (`@fastify/rate-limit`, keyed by IP) reuses the `UPSTREAM_RATE_LIMITED` error code for its 429s, for one consistent envelope, even though the LLD's error matrix defines that code for the upstream/extraction throttle specifically. A distinct `CLIENT_RATE_LIMITED` code would be more precise; not worth a schema change for this scope.

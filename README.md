@@ -145,66 +145,47 @@ Every error, from every endpoint, uses one shape:
 
 ## Approach
 
-Full design docs are in [`docs/`](docs/) (`01_HLD.md` through `08_Risk_Limitations.md`) — they were written first and the implementation follows them. Summary:
+Full design docs are in [`docs/`](docs/) (`01_HLD.md` through `08_Risk_Limitations.md`) — they were written first and the implementation follows them.
 
-- **No browser automation in the live path, per the challenge's official clarification** (see [`docs/00_Original_Challenge.md`](docs/00_Original_Challenge.md)): "a purely reverse-engineered solution that directly hits LinkedIn endpoints and does not use a browser." Both deployed extractors (`linkedinExtractor.ts`, `publicExtractor.ts`) only make direct HTTP calls to LinkedIn's own endpoints. `playwrightExtractor.ts` exists purely as a local-only diagnostic (see [Extraction layer](#extraction-layer)) and is never wired into the deployed request path.
-- **Layered single service**, not microservices: API (Fastify) → validation → cache (Redis) → queue (BullMQ) → extraction (behind an interface) → formatter → response. Each layer is a separate module so it could be split into its own service later without a rewrite.
-- **Sync-with-timeout request mode** (per `docs/02_LLD.md` §5): the client gets one HTTP response, not a poll loop. Internally, the request still goes through a real BullMQ job — `POST /api/v1/profile` enqueues a job and awaits it with a bounded timeout (`EXTRACTION_TIMEOUT_MS`), so retry/backoff and the extraction throttle are real, not simulated. Async job-status polling (`GET /api/v1/profile/status/:jobId`) is designed for in the LLD but not wired up — noted as a "designed for, not built" extension point, matching the LLD's own recommendation for a 3-day scope.
-- **Isolation of the extraction layer**: `ProfileExtractor.fetch(url)` is the one seam the rest of the system depends on. Swap `mockExtractor` for a real implementation and nothing else changes.
-- **Fail-open cache**: if Redis is down, `getCachedProfile`/`setCachedProfile` log a warning and behave as a miss/no-op rather than failing the request — matches the error-handling matrix in `docs/06_Project_Plan_Checkpoints.md` §3.
-- **In-process worker**: for this scope, the BullMQ worker runs in the same container/process as the API (`src/queue/worker.ts` is imported as a side effect of `src/api/server.ts`) — see `docs/03_Architecture.md` §3–4 for how this would split into its own deployable process to scale extraction independently of API traffic.
+- **No browser automation in the live path**, per the challenge's official clarification ([`docs/00_Original_Challenge.md`](docs/00_Original_Challenge.md)): both deployed extractors only make direct HTTP calls to LinkedIn's own endpoints.
+- **Layered single service**, not microservices: API (Fastify) → validation → cache (Redis) → queue (BullMQ) → extraction (behind an interface) → formatter → response, each a separate module.
+- **Sync-with-timeout request mode**: the client gets one HTTP response, backed internally by a real BullMQ job (bounded by `EXTRACTION_TIMEOUT_MS`) so retry/backoff and the extraction throttle are real, not simulated.
+- **Isolation of the extraction layer**: `ProfileExtractor.fetch(url)` is the one seam the rest of the system depends on — swap in a different implementation and nothing else changes.
+- **Fail-open cache**: if Redis is down, cache reads/writes log a warning and behave as a miss/no-op rather than failing the request.
 
-Architecture and sequence diagrams: [`docs/04_Architecture_Diagram.md`](docs/04_Architecture_Diagram.md) (Mermaid, renders natively on GitHub).
+Deviations from the design docs (naming choices and internal plumbing, no contract impact) are logged in [`docs/03_Architecture.md` §7](docs/03_Architecture.md#7-deviations-from-the-design-docs).
 
-### Deviations from the design docs
+```mermaid
+flowchart LR
+    Client([Client / Reviewer]) -->|POST /api/v1/profile| API[Fastify API Layer]
+    API --> Validate[Validation Layer]
+    Validate -->|invalid| ErrClient[400 Error Response]
+    Validate -->|valid| Cache[(Redis Cache)]
+    Cache -->|hit| API
+    Cache -->|miss| Queue[BullMQ Job Queue]
+    Queue --> Worker[Extraction Worker]
+    Worker --> Extractor[[ProfileExtractor Interface]]
+    Extractor --> LinkedIn[(LinkedIn)]
+    Extractor --> Formatter[Formatter / Mapper]
+    Formatter --> Cache
+    Formatter --> API
+    API --> Client
+```
 
-- Added `src/services/profileService.ts` (not in `docs/05_Folder_Structure.md`) as the orchestration layer between the controller and cache/queue/formatter — the LLD describes this orchestration (§9, "Sequence: Single Request") but doesn't name a file for it.
-- The BullMQ↔Fastify error boundary: BullMQ only reliably preserves `Error.message` (not custom error classes) across the queue. The worker encodes `{ code, message }` as JSON in the thrown message; `runExtractionJob` in `src/queue/queue.ts` decodes it back into the matching `AppError` subclass. This is internal plumbing, not a contract change — same doc'd error matrix, same public shapes.
-- Client-facing rate limiting (`@fastify/rate-limit`, keyed by IP) reuses the `UPSTREAM_RATE_LIMITED` error code for its 429s, for one consistent envelope, even though the LLD's error matrix defines that code for the upstream/extraction throttle specifically. A distinct `CLIENT_RATE_LIMITED` code would be more precise; not worth a schema change for this scope.
+Sequence, deployment, and error-flow diagrams: [`docs/04_Architecture_Diagram.md`](docs/04_Architecture_Diagram.md).
 
 ## Extraction layer
 
-Four implementations behind the same `ProfileExtractor` interface (`src/extraction/ProfileExtractor.interface.ts`). `src/queue/worker.ts` chooses between the two *deployed* ones per request, with automatic fallback — there is no mock/fake data anywhere in the live request path.
+Four implementations behind the same `ProfileExtractor` interface. `src/queue/worker.ts` chooses between the two *deployed* ones per request, with automatic fallback — there is no mock/fake data anywhere in the live request path.
 
 | Extractor | Used when | What it does |
 |---|---|---|
-| `linkedinExtractor.ts` | Tried first, whenever credentials are configured | Authenticated calls straight to LinkedIn's internal APIs — full data. See below. |
+| `linkedinExtractor.ts` | Tried first, whenever credentials are configured | Authenticated calls straight to LinkedIn's internal APIs — full data, confirmed live-working end to end (2026-08-31). |
 | `publicExtractor.ts` | No credentials set, **or** as automatic fallback if `linkedinExtractor` fails | Reads the schema.org `JSON-LD` block on the public profile page — real but partial data, no login. |
-| `playwrightExtractor.ts` | Local-only, manual (`npm run extract:local -- <url>`) | Headless-browser diagnostic tool. **Never** deployed or on the request path — see why below. |
+| `playwrightExtractor.ts` | Local-only, manual (`npm run extract:local -- <url>`) | Headless-browser diagnostic tool. **Never** deployed or on the request path (not permitted by the challenge brief; also too heavy for Render's free tier). |
 | `mockExtractor.ts` | Test suite only | Fixture data so tests don't need network access or real credentials. |
 
-### `linkedinExtractor.ts` — confirmed live-working end to end against a real account (2026-08-31)
-
-Two calls into two different LinkedIn systems, both real and unofficial/reverse-engineered:
-
-- **Top card** (name, headline, location, photo) — LinkedIn's internal Voyager **"Dash"** API (`voyagerIdentityDashProfiles`, `decorationId=...TopCardComplete-138`). The response is `{data, included}`; the profile record lives in `included`, keyed by `$recipeTypes` naming `TopCardComplete`. Location is a second-hop lookup through a separate geo entity elsewhere in `included`.
-- **Deep sections** (about, experience, education, skills, certifications, languages) — a different system: LinkedIn's React Server Components **"Flight protocol"** rendering pipeline (`linkedinFlightProtocol.ts`), fetched via `POST /flagship-web/rsc-action/actions/component`. Content isn't named JSON fields — it's plain rendered text recovered by pattern-matching a handful of recurring component shapes (see that module's docstring). Each section is fetched and fails independently: a bad parse or a `500` on one section just omits that field, never fails the whole request.
-  - **Multi-position grouping:** LinkedIn groups promotions at one company under a single header (title = company name, subtitle = "Employment type · total duration"), followed by title-only position entries. `parseExperience` (`linkedinSectionParsers.ts`) detects that header shape by its employment-type vocabulary and carries the company forward onto each position beneath it.
-  - **Multi-paragraph text:** About and job/education descriptions render as a nested array of line segments, not one string — reconstructed by recursively joining the segments.
-  - **Experience pagination:** the section response above is a capped *preview*; on a profile with enough history it drops entries past the first page. Experience additionally fetches LinkedIn's own "see all" details page for the complete list, and still sources descriptions from the clean preview response (the details page interleaves full site chrome into the list, so its own description positions aren't trustworthy).
-
-  Both calls are gated by a self-imposed pacing module (`linkedinPacing.ts`: a minimum interval between calls, plus a cooldown after any detected block) — disciplined pacing, not evasion tooling, since LinkedIn's blocking is account-level and behavior-based rather than fingerprint-based.
-
-  The full story behind each of the three bullets above — what broke, how it was diagnosed, how it was fixed — is in [`docs/08_Risk_Limitations.md` §7 Incident History](docs/08_Risk_Limitations.md#7-incident-history).
-
-### `publicExtractor.ts`
-
-No login needed. Real data, but much less of it: name, headline, current company/location, about, photo — experience/education/skills/certifications/languages aren't exposed to anonymous visitors, so those keys are omitted (same null-vs-omission convention as everywhere else).
-
-### `playwrightExtractor.ts` — why it isn't deployed
-
-First and foremost, it isn't allowed to be: the challenge's official clarification email states the solution must be "a purely reverse-engineered solution that directly hits LinkedIn endpoints and does not use a browser" (see [`docs/00_Original_Challenge.md`](docs/00_Original_Challenge.md)). It was built and kept strictly as a **local-only diagnostic** — it's what confirmed an early block was happening at LinkedIn's edge/CDN layer rather than being specific to the Voyager API shape (see the incident history linked above), not a candidate for the submitted solution. It also wouldn't be practical to deploy anyway: headless Chromium needs ~300–400MB RAM on top of the Node process, risking an OOM crash on Render's free-tier instance (512MB total). Run it with `npm run extract:local -- <profile-url>` (needs `npx playwright install chromium` once).
-
-### Real (authenticated) extraction setup
-
-1. Log into linkedin.com in your browser.
-2. Open devtools → Application/Storage → Cookies → `https://www.linkedin.com`.
-3. Copy the values of the `li_at` and `JSESSIONID` cookies (the latter includes surrounding quotes in the browser — set the env var **without** the quotes).
-4. Set `LINKEDIN_LI_AT` and `LINKEDIN_JSESSIONID` in `.env` (or Render's environment variables). `docker-compose up` reads the same repo-root `.env` automatically — just restart the stack after editing it.
-5. Leave both unset (or if the authenticated call fails) and the app still returns real, if partial, data via `publicExtractor` — no setup required, and no hard failure either way.
-6. `npm run probe:linkedin -- <profile-url>` — diagnostic-only, local, not part of the request path. Fetches the top-card call plus every Flight-protocol section (`scripts/probeLinkedinDashSections.ts`) and prints each raw response — useful for re-checking `linkedinFlightProtocol.ts`'s parsers against a real response shape whenever LinkedIn's next frontend rebuild rotates the componentId names or CSS-in-JS class markers this parsing keys off of.
-
-**On credential lifetime and how this is meant to be evaluated:** the challenge brief explicitly says *"you may use your own LinkedIn credentials in the backend"* — these credentials live only in the deployment's environment variables (Render's, in this submission), never in the evaluator's hands. Whoever tests the live public URL just POSTs a profile URL; they never need to supply `li_at`/`JSESSIONID` themselves. `li_at` is long-lived by design (LinkedIn sets it to persist roughly a year), but if it expires, gets revoked, or the account gets flagged before this is evaluated, the authenticated path fails closed into `publicExtractor` (step 5 above) rather than breaking the deployed service. Anyone who prefers to test with their *own* live session can clone the repo and follow steps 1–4 with their own account. Full detail: [`docs/08_Risk_Limitations.md` §3a](docs/08_Risk_Limitations.md#3a-credential-lifetime--how-this-is-meant-to-be-evaluated).
+Both LinkedIn systems it calls (the Voyager "Dash" top-card API and the React "Flight protocol" section renderer) are unofficial and reverse-engineered, self-paced by `linkedinPacing.ts` to avoid tripping LinkedIn's account-level rate limits. Full breakdown — per-extractor internals, the auth cookie setup steps, and how credential lifetime is meant to be evaluated: [`docs/09_Extraction_Layer.md`](docs/09_Extraction_Layer.md).
 
 ## Project structure
 
