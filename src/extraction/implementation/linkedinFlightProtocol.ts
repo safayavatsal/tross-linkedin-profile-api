@@ -42,6 +42,86 @@ export const FLIGHT_COMPONENT_IDS = {
 } as const;
 export type FlightSection = keyof typeof FLIGHT_COMPONENT_IDS;
 
+const BROWSER_HEADERS = {
+  "user-agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+};
+
+function authCookieHeaders(): Record<string, string> {
+  return {
+    cookie: `li_at=${config.linkedinLiAt}; JSESSIONID="${config.linkedinJsessionid}"`,
+    "csrf-token": config.linkedinJsessionid as string,
+    ...BROWSER_HEADERS,
+  };
+}
+
+// The rsc-action component call above returns a *preview* of a section — every
+// section response carries `paginationNeeded:true` and a "See all" link to
+// `/in/{id}/details/{section}/` — confirmed live (T13) to actually drop entries past
+// the first page for a profile with enough experience history (19 real positions;
+// the preview capped at 9). Education/skills/certifications/languages were checked
+// against the same account and came back complete from the preview alone (their
+// lists are short enough not to hit the cap), so only experience pays for the extra
+// fetch below. If a future profile hits the same cap on one of those sections, this
+// is the pattern to extend.
+//
+// The details page is a full HTML page, but the real data isn't in the markup — it's
+// the same Flight wire format embedded as `window.__como_rehydration__ = [...]`, a JS
+// array of string chunks that concatenate back into one stream, parseable by the exact
+// same parseFlightResponse used for the rsc-action response. It also renders the full
+// page chrome (global nav, "who viewed your profile" rail, etc.), which can shows up
+// as extra title/subtitle-shaped noise and unrelated description text interleaved with
+// the real list — extractCardEntries filters the one recurring noise card it's known
+// to produce, but its description positions are NOT trustworthy this way (see
+// parseExperience in linkedinSectionParsers.ts, which sources descriptions from the
+// clean preview response instead and only uses this page for entry completeness).
+function extractRehydrationStream(html: string): string | null {
+  const marker = "window.__como_rehydration__ = ";
+  const markerIdx = html.indexOf(marker);
+  if (markerIdx === -1) return null;
+  const arrStart = html.indexOf("[", markerIdx);
+  if (arrStart === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let i = arrStart;
+  for (; i < html.length; i++) {
+    const ch = html[i];
+    if (inString) {
+      if (ch === "\\") i++;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "[") depth++;
+    else if (ch === "]") {
+      depth--;
+      if (depth === 0) {
+        i++;
+        break;
+      }
+    }
+  }
+
+  try {
+    const parts = JSON.parse(html.slice(arrStart, i)) as string[];
+    return parts.join("");
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchDetailsPage(publicId: string, section: FlightSection): Promise<string> {
+  const res = await fetch(`https://www.linkedin.com/in/${publicId}/details/${section}/`, {
+    headers: authCookieHeaders(),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const html = await res.text();
+  const stream = extractRehydrationStream(html);
+  if (!stream) throw new Error("LinkedIn details page did not contain the expected rehydration payload");
+  return stream;
+}
+
 export async function fetchFlightComponent(publicId: string, section: FlightSection): Promise<string> {
   const componentId = FLIGHT_COMPONENT_IDS[section];
   const url = new URL(COMPONENT_URL);
@@ -49,13 +129,7 @@ export async function fetchFlightComponent(publicId: string, section: FlightSect
   url.searchParams.set("sduiid", componentId);
   const res = await fetch(url.toString(), {
     method: "POST",
-    headers: {
-      cookie: `li_at=${config.linkedinLiAt}; JSESSIONID="${config.linkedinJsessionid}"`,
-      "csrf-token": config.linkedinJsessionid as string,
-      "content-type": "application/json",
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    },
+    headers: { ...authCookieHeaders(), "content-type": "application/json" },
     body: JSON.stringify({
       clientArguments: {
         payload: { isSelfView: false, vanityName: publicId },
@@ -118,6 +192,36 @@ function singleTextChild(children: unknown): string | null {
   return Array.isArray(children) && children.length === 1 && typeof children[0] === "string" ? children[0] : null;
 }
 
+// A description's `children` isn't always a single string: multi-paragraph text (About,
+// job/education descriptions) renders as nested `["$", alias, key, {children}]` segment
+// tuples — one per line, each optionally preceded by a `<br/>` element — instead of one
+// flat string. Recursively join every leaf string, one per line.
+function flattenRichText(node: unknown): string {
+  if (typeof node === "string") return node;
+  if (!Array.isArray(node)) return "";
+  if (node.length === 4 && node[0] === "$") {
+    const props = node[3];
+    if (props && typeof props === "object" && "children" in (props as Record<string, unknown>)) {
+      return flattenRichText((props as Record<string, unknown>).children);
+    }
+    return "";
+  }
+  return node
+    .map(flattenRichText)
+    .filter(Boolean)
+    .join("\n");
+}
+
+function textOf(children: unknown): string | null {
+  const simple = singleTextChild(children);
+  if (simple !== null) return simple;
+  if (Array.isArray(children) && children.length === 1 && Array.isArray(children[0])) {
+    const text = flattenRichText(children[0]);
+    return text || null;
+  }
+  return null;
+}
+
 type Classified = { kind: "title" | "subtitle" | "smalltext" | "description"; text: string };
 
 function classify(value: unknown, aliasToHash: Map<string, string>): Classified | null {
@@ -138,14 +242,14 @@ function classify(value: unknown, aliasToHash: Map<string, string>): Classified 
 
   if (resolved === TEXT_COMPONENT_HASH) {
     const textProps = (p.textProps as Record<string, unknown> | undefined) ?? {};
-    const text = singleTextChild(textProps.children);
+    const text = textOf(textProps.children);
     if (text === null) return null;
     return { kind: "expansionKey" in p ? "description" : "smalltext", text };
   }
 
   if (resolved === EXPANDABLE_TEXT_HASH) {
     const textProps = (p.textProps as Record<string, unknown> | undefined) ?? {};
-    const text = singleTextChild(textProps.children);
+    const text = textOf(textProps.children);
     return text !== null ? { kind: "description", text } : null;
   }
 
@@ -208,7 +312,11 @@ export function extractCardEntries(parsed: FlightParsed): FlightCardEntry[] {
   entries.forEach((entry, idx) => {
     if (descriptions[idx] !== undefined) entry.description = descriptions[idx];
   });
-  return entries;
+
+  // Details pages (see fetchDetailsPage) render the full page chrome, including the
+  // right-rail "who viewed your profile" upsell — a title/subtitle card shape
+  // indistinguishable from real data except for this fixed, non-data subtitle text.
+  return entries.filter((entry) => entry.subtitle !== "See who viewed your profile");
 }
 
 export function extractAboutText(parsed: FlightParsed): string | null {

@@ -150,8 +150,9 @@ describe("linkedinExtractor", () => {
     expect(raw.certifications).toBeUndefined();
     expect(raw.languages).toBeUndefined();
     expect(raw.about).toBeNull();
-    // top-card + about + experience + education + skills + certifications + languages = 7 calls
-    expect(fetchMock).toHaveBeenCalledTimes(7);
+    // top-card + about + experience(preview) + experience(details page) + education +
+    // skills + certifications + languages = 8 calls
+    expect(fetchMock).toHaveBeenCalledTimes(8);
   });
 
   it("self-paces: a second call before the minimum interval is rejected without hitting the network", async () => {
@@ -169,8 +170,9 @@ describe("linkedinExtractor", () => {
     await expect(linkedinExtractor.fetch("https://www.linkedin.com/in/jane-doe")).rejects.toBeInstanceOf(
       UpstreamRateLimitedError,
     );
-    // First call: top-card + about + experience + education + skills + certifications +
-    // languages = 7. Second call is rejected by the pacing gate before any network call.
-    expect(fetchMock).toHaveBeenCalledTimes(7);
+    // First call: top-card + about + experience(preview) + experience(details page) +
+    // education + skills + certifications + languages = 8. Second call is rejected by
+    // the pacing gate before any network call.
+    expect(fetchMock).toHaveBeenCalledTimes(8);
   });
 });

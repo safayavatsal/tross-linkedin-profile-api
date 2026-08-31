@@ -8,7 +8,7 @@ import {
 import { isRedirectBlock } from "./redirectBlock.js";
 import { msUntilAllowed, recordAttempt, recordBlock } from "./linkedinPacing.js";
 import { topCardUrl } from "./linkedinDashEndpoints.js";
-import { fetchFlightComponent, parseFlightResponse, type FlightSection } from "./linkedinFlightProtocol.js";
+import { fetchFlightComponent, fetchDetailsPage, parseFlightResponse, type FlightSection } from "./linkedinFlightProtocol.js";
 import {
   parseAbout,
   parseExperience,
@@ -152,15 +152,23 @@ export const linkedinExtractor: ProfileExtractor = {
     // already governs the rate of *separate profile fetches*; this is one logical fetch. Any
     // individual section failing (wrong componentId after LinkedIn's next rebuild, transient
     // 500, etc.) just means that one section stays unpopulated — never fails the whole request.
-    const sections = ["about", "experience", "education", "skills", "certifications", "languages"] as const;
-    const [about, experience, education, skills, certifications, languages] = await Promise.allSettled(
-      sections.map((section: FlightSection) =>
-        fetchFlightComponent(publicIdentifier, section).then(parseFlightResponse),
-      ),
-    );
+    const previewSections = ["about", "experience", "education", "skills", "certifications", "languages"] as const;
+    const [[about, experiencePreview, education, skills, certifications, languages], experienceFull] =
+      await Promise.all([
+        Promise.allSettled(
+          previewSections.map((section: FlightSection) =>
+            fetchFlightComponent(publicIdentifier, section).then(parseFlightResponse),
+          ),
+        ),
+        fetchDetailsPage(publicIdentifier, "experience").then(parseFlightResponse).catch(() => null),
+      ]);
 
     if (about.status === "fulfilled") profile.about = parseAbout(about.value);
-    if (experience.status === "fulfilled") profile.experience = parseExperience(experience.value);
+    if (experienceFull) {
+      profile.experience = parseExperience(experienceFull, experiencePreview.status === "fulfilled" ? experiencePreview.value : null);
+    } else if (experiencePreview.status === "fulfilled") {
+      profile.experience = parseExperience(experiencePreview.value, experiencePreview.value);
+    }
     if (education.status === "fulfilled") profile.education = parseEducation(education.value);
     if (skills.status === "fulfilled") profile.skills = parseSkills(skills.value);
     if (certifications.status === "fulfilled") profile.certifications = parseCertifications(certifications.value);

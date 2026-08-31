@@ -9,7 +9,7 @@ import { config } from "../src/config/index.js";
 import { isRedirectBlock } from "../src/extraction/implementation/redirectBlock.js";
 import { msUntilAllowed, recordAttempt, recordBlock } from "../src/extraction/implementation/linkedinPacing.js";
 import { topCardUrl } from "../src/extraction/implementation/linkedinDashEndpoints.js";
-import { fetchFlightComponent, FLIGHT_COMPONENT_IDS, type FlightSection } from "../src/extraction/implementation/linkedinFlightProtocol.js";
+import { fetchFlightComponent, fetchDetailsPage, FLIGHT_COMPONENT_IDS, type FlightSection } from "../src/extraction/implementation/linkedinFlightProtocol.js";
 
 const url = process.argv[2];
 if (!url) {
@@ -61,5 +61,10 @@ await paced("top-card", async () => {
 
 for (const section of Object.keys(FLIGHT_COMPONENT_IDS) as FlightSection[]) {
   await sleep(1500); // avoid firing every section call back-to-back with zero gap
-  await paced(`section: ${section}`, () => fetchFlightComponent(publicIdentifier, section));
+  await paced(`section (preview): ${section}`, () => fetchFlightComponent(publicIdentifier, section));
 }
+
+// Experience alone also goes through the details page in production (see linkedinExtractor.ts) —
+// the preview above caps out well short of a full history on a profile with many positions.
+await sleep(1500);
+await paced("experience (details page, full list)", () => fetchDetailsPage(publicIdentifier, "experience"));
