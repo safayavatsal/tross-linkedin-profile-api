@@ -2,7 +2,7 @@
 
 A hosted HTTP API that accepts a LinkedIn profile URL and returns structured JSON (name, headline, location, about, experience, education, skills, certifications, languages, images). Built for the Tross engineering hiring challenge.
 
-> **Extraction is real, not mocked** — an authenticated LinkedIn Voyager extractor with a no-login public fallback, both behind a swappable `ProfileExtractor` interface. See [Extraction layer](#extraction-layer) for what each does, how to enable the authenticated path, and — importantly — a concrete account of the extraction surface being actively hostile right now (LinkedIn's REST API returning `410 Gone`, anonymous views hitting a signup wall) discovered while building this.
+> **Extraction is real, not mocked.** An authenticated LinkedIn extractor with a no-login public fallback, both behind a swappable `ProfileExtractor` interface — see [Extraction layer](#extraction-layer).
 
 ## Contents
 
@@ -25,31 +25,8 @@ docker-compose -f docker/compose/docker-compose.yml up --build
 curl http://localhost:3000/health
 ```
 
-**Stuck on `localhost:3000` after `docker compose up`, even though `docker ps` shows everything running/healthy?** See [Troubleshooting: Docker reports healthy but `localhost:3000` won't load (macOS)](#troubleshooting-docker-reports-healthy-but-localhost3000-wont-load-macos) below.
-
-### Option B — local Node
-
-Requires Node 20+ and a Redis instance reachable at `REDIS_URL` (defaults to `redis://localhost:6379`).
-
-```bash
-npm install
-cp .env.example .env
-npm run dev        # tsx watch, http://localhost:3000
-```
-
-Try it:
-
-```bash
-curl -X POST http://localhost:3000/api/v1/profile \
-  -H 'Content-Type: application/json' \
-  -d '{"linkedin_url":"https://www.linkedin.com/in/jane-doe-example"}'
-```
-
-The first call fetches through the (mock) extraction pipeline (`meta.source: "live"`); repeat the same URL and it's served from Redis (`meta.source: "cache"`).
-
-There's also a minimal browser UI at [`http://localhost:3000`](http://localhost:3000) — a single form that POSTs to `/api/v1/profile` and prints the raw JSON response (`public/index.html`, served by `src/api/routes/ui.routes.ts`, no framework or build step).
-
-### Troubleshooting: Docker reports healthy but `localhost:3000` won't load (macOS)
+<details>
+<summary><strong>Stuck on <code>localhost:3000</code> after <code>docker compose up</code>, even though <code>docker ps</code> shows everything healthy? (macOS)</strong></summary>
 
 **Symptom:** `docker compose ps` shows both containers `Up`/`healthy`, `docker compose logs app` shows `Server listening at http://127.0.0.1:3000`, but the browser hangs indefinitely on `localhost:3000` and `curl http://127.0.0.1:3000/health` fails outright with:
 
@@ -85,6 +62,30 @@ sudo ifconfig lo0 alias 127.0.0.1 up
 This adds `127.0.0.1` back as an additional address on `lo0` alongside whatever the VPN added — it doesn't remove or fight the VPN's own address, so it's safe to run. Verify with `ifconfig lo0 | grep "inet "` (you should now see both addresses) and `curl http://127.0.0.1:3000/health`.
 
 **Not permanent** — a VPN reconnect or a reboot can re-apply the hijack, so you may need to re-run the command after either. If this happens repeatedly on a work machine, it's worth flagging to IT — the VPN client's behavior is the root cause, not something any app can fix on its own.
+
+</details>
+
+### Option B — local Node
+
+Requires Node 20+ and a Redis instance reachable at `REDIS_URL` (defaults to `redis://localhost:6379`).
+
+```bash
+npm install
+cp .env.example .env
+npm run dev        # tsx watch, http://localhost:3000
+```
+
+Try it:
+
+```bash
+curl -X POST http://localhost:3000/api/v1/profile \
+  -H 'Content-Type: application/json' \
+  -d '{"linkedin_url":"https://www.linkedin.com/in/jane-doe-example"}'
+```
+
+The first call fetches through the extraction pipeline (`meta.source: "live"`); repeat the same URL and it's served from Redis (`meta.source: "cache"`).
+
+There's also a minimal browser UI at [`http://localhost:3000`](http://localhost:3000) — a single form that POSTs to `/api/v1/profile` and prints the raw JSON response (`public/index.html`, served by `src/api/routes/ui.routes.ts`, no framework or build step).
 
 ## API
 
@@ -163,16 +164,36 @@ Architecture and sequence diagrams: [`docs/04_Architecture_Diagram.md`](docs/04_
 
 ## Extraction layer
 
-Four implementations behind the same `ProfileExtractor` interface (`src/extraction/ProfileExtractor.interface.ts`). `src/queue/worker.ts` chooses between the two *deployed* ones per request, with automatic fallback — there is no mock/fake data anywhere in the live request path:
+Four implementations behind the same `ProfileExtractor` interface (`src/extraction/ProfileExtractor.interface.ts`). `src/queue/worker.ts` chooses between the two *deployed* ones per request, with automatic fallback — there is no mock/fake data anywhere in the live request path.
 
-- **`linkedinExtractor.ts`** (tried first, when configured) — **confirmed live-working end to end against a real account (2026-08-31)**, after the edge-level block that dogged this build for its first three days turned out to be a stale, over-used session cookie rather than a permanent account ban (see [Known limitations](#known-limitations)). Two calls into two different systems, both real:
-  - **Top card** (name, headline, location, photo): LinkedIn's internal Voyager **"Dash"** API (`voyagerIdentityDashProfiles`, `decorationId=...TopCardComplete-138`). This replaces an earlier version that called the classic `profileView` REST endpoint, which returned `410 Gone` during this build. Verified live: the actual response shape is `{data, included}` (not the `{elements}` shape first assumed) — the profile record lives in `included`, keyed by `$recipeTypes` naming `TopCardComplete`; location is a second-hop lookup through a separate geo entity elsewhere in `included`.
-  - **Deep sections** (about, experience, education, skills, certifications, languages): a completely different system — LinkedIn has migrated this part of the profile page to a React Server Components **"Flight protocol"** rendering pipeline (`linkedinFlightProtocol.ts`), fetched via `POST /flagship-web/rsc-action/actions/component`. The Voyager GraphQL "ProfileComponentsBySectionType" query this project used before is dead (confirmed live: `HTTP 500` from LinkedIn's own backend, and no longer referenced by any client JS the profile page currently loads). Content in a Flight response isn't named JSON fields — it's plain rendered text recovered by pattern-matching a handful of recurring component shapes (see the module's docstring). Each section is fetched independently and fails independently — a bad parse or a `500` on one section just omits that field, never fails the whole request. **Multi-position grouping:** LinkedIn groups promotions at one company under a single header in its UI (title = company name, subtitle = "Employment type · total duration", no company info at all) followed by title-only position entries with no subtitle of their own. `parseExperience` (`linkedinSectionParsers.ts`) detects that header shape — subtitle starting with one of LinkedIn's fixed employment-type words (Full-time, Part-time, Self-employed, ...) rather than a company name — and carries its title forward as the company for each position that follows, dropping the header itself. Verified live against a real multi-position profile. **Multi-paragraph text (About, descriptions):** LinkedIn doesn't render a long text block as one string — it's a nested array of one segment per line, each optionally preceded by a `<br/>`. The parser flattens that back into a single newline-joined string; the earlier version only handled the single-string case and silently returned `null` for every profile with real paragraph breaks in About or a job/education description. **Experience pagination:** the rsc-action response above is a *preview* — every section carries a `paginationNeeded:true` flag and a "See all" link to `/in/{id}/details/{section}/`, and on a profile with enough history the preview genuinely drops entries past the first page (verified live: a 19-position profile came back with 9). Experience additionally fetches that details page — a full HTML page, but the real data is the same Flight wire format embedded as `window.__como_rehydration__ = [...]` — for the complete list; since that page also renders full site chrome (global nav, a "who viewed your profile" rail) interleaved with the real list, its own description text isn't positionally trustworthy, so descriptions still come from the clean preview response, matched back onto the full list by (title, dates). Education/skills/certifications/languages were checked against the same account and came back complete from the preview alone, so only experience pays for the extra call — see `linkedinFlightProtocol.ts` if a future profile needs the same treatment for one of those.
+| Extractor | Used when | What it does |
+|---|---|---|
+| `linkedinExtractor.ts` | Tried first, whenever credentials are configured | Authenticated calls straight to LinkedIn's internal APIs — full data. See below. |
+| `publicExtractor.ts` | No credentials set, **or** as automatic fallback if `linkedinExtractor` fails | Reads the schema.org `JSON-LD` block on the public profile page — real but partial data, no login. |
+| `playwrightExtractor.ts` | Local-only, manual (`npm run extract:local -- <url>`) | Headless-browser diagnostic tool. **Never** deployed or on the request path — see why below. |
+| `mockExtractor.ts` | Test suite only | Fixture data so tests don't need network access or real credentials. |
 
-  Both calls are gated by a small self-imposed pacing module (`linkedinPacing.ts`: a minimum interval between calls plus a cooldown window after any detected block — LinkedIn's own blocking is account-level and behavior-based, not fingerprint-based, so disciplined pacing is the mitigation, not evasion tooling). `worker.ts` tries this path first whenever credentials are configured, falling back to `publicExtractor` on any failure.
-- **`publicExtractor.ts`** (used when no credentials are set, **and** automatically as a fallback if `linkedinExtractor` fails for any reason) — no login needed. Reads the schema.org `JSON-LD` block LinkedIn embeds on public profile pages for search-engine indexing. Real data, but much less of it: name, headline, current company/location, about, photo — experience/education/skills/certifications/languages aren't exposed to anonymous visitors, so those keys are omitted (same null-vs-omission convention as everywhere else).
-- **`playwrightExtractor.ts`** (local-only, **not** deployed — see below) — renders the real profile page in headless Chromium with your session cookies and scrapes the hydrated DOM, instead of parsing LinkedIn's internal API responses. Run it with `npm run extract:local -- <profile-url>`.
-- **`mockExtractor.ts`** — not used at runtime. Kept only as a fixture for the unit/integration test suite (`tests/unit/formatter.test.ts`, etc.), so tests don't depend on network access or real credentials.
+### `linkedinExtractor.ts` — confirmed live-working end to end against a real account (2026-08-31)
+
+Two calls into two different LinkedIn systems, both real and unofficial/reverse-engineered:
+
+- **Top card** (name, headline, location, photo) — LinkedIn's internal Voyager **"Dash"** API (`voyagerIdentityDashProfiles`, `decorationId=...TopCardComplete-138`). The response is `{data, included}`; the profile record lives in `included`, keyed by `$recipeTypes` naming `TopCardComplete`. Location is a second-hop lookup through a separate geo entity elsewhere in `included`.
+- **Deep sections** (about, experience, education, skills, certifications, languages) — a different system: LinkedIn's React Server Components **"Flight protocol"** rendering pipeline (`linkedinFlightProtocol.ts`), fetched via `POST /flagship-web/rsc-action/actions/component`. Content isn't named JSON fields — it's plain rendered text recovered by pattern-matching a handful of recurring component shapes (see that module's docstring). Each section is fetched and fails independently: a bad parse or a `500` on one section just omits that field, never fails the whole request.
+  - **Multi-position grouping:** LinkedIn groups promotions at one company under a single header (title = company name, subtitle = "Employment type · total duration"), followed by title-only position entries. `parseExperience` (`linkedinSectionParsers.ts`) detects that header shape by its employment-type vocabulary and carries the company forward onto each position beneath it.
+  - **Multi-paragraph text:** About and job/education descriptions render as a nested array of line segments, not one string — reconstructed by recursively joining the segments.
+  - **Experience pagination:** the section response above is a capped *preview*; on a profile with enough history it drops entries past the first page. Experience additionally fetches LinkedIn's own "see all" details page for the complete list, and still sources descriptions from the clean preview response (the details page interleaves full site chrome into the list, so its own description positions aren't trustworthy).
+
+  Both calls are gated by a self-imposed pacing module (`linkedinPacing.ts`: a minimum interval between calls, plus a cooldown after any detected block) — disciplined pacing, not evasion tooling, since LinkedIn's blocking is account-level and behavior-based rather than fingerprint-based.
+
+  The full story behind each of the three bullets above — what broke, how it was diagnosed, how it was fixed — is in [`docs/08_Risk_Limitations.md` §7 Incident History](docs/08_Risk_Limitations.md#7-incident-history).
+
+### `publicExtractor.ts`
+
+No login needed. Real data, but much less of it: name, headline, current company/location, about, photo — experience/education/skills/certifications/languages aren't exposed to anonymous visitors, so those keys are omitted (same null-vs-omission convention as everywhere else).
+
+### `playwrightExtractor.ts` — why it isn't deployed
+
+First and foremost, it isn't allowed to be: the challenge's official clarification email states the solution must be "a purely reverse-engineered solution that directly hits LinkedIn endpoints and does not use a browser" (see [`docs/00_Original_Challenge.md`](docs/00_Original_Challenge.md)). It was built and kept strictly as a **local-only diagnostic** — it's what confirmed an early block was happening at LinkedIn's edge/CDN layer rather than being specific to the Voyager API shape (see the incident history linked above), not a candidate for the submitted solution. It also wouldn't be practical to deploy anyway: headless Chromium needs ~300–400MB RAM on top of the Node process, risking an OOM crash on Render's free-tier instance (512MB total). Run it with `npm run extract:local -- <profile-url>` (needs `npx playwright install chromium` once).
 
 ### Real (authenticated) extraction setup
 
@@ -183,15 +204,7 @@ Four implementations behind the same `ProfileExtractor` interface (`src/extracti
 5. Leave both unset (or if the authenticated call fails) and the app still returns real, if partial, data via `publicExtractor` — no setup required, and no hard failure either way.
 6. `npm run probe:linkedin -- <profile-url>` — diagnostic-only, local, not part of the request path. Fetches the top-card call plus every Flight-protocol section (`scripts/probeLinkedinDashSections.ts`) and prints each raw response — useful for re-checking `linkedinFlightProtocol.ts`'s parsers against a real response shape whenever LinkedIn's next frontend rebuild rotates the componentId names or CSS-in-JS class markers this parsing keys off of.
 
-**On credential lifetime and how this is meant to be evaluated:** the challenge brief explicitly says *"you may use your own LinkedIn credentials in the backend"* — the intended model is that these credentials live only in the deployment's environment variables (Render's, in this submission), never in the evaluator's hands. Whoever tests the live public URL just POSTs a profile URL; they never need to supply `li_at`/`JSESSIONID` themselves. `li_at` is a long-lived cookie by design (LinkedIn sets it to persist roughly a year) and doesn't rotate on every login/refresh under normal circumstances — but if it does expire, get revoked, or the account gets flagged between submission and whenever this is actually evaluated, the authenticated path fails closed into `publicExtractor` (step 5 above) rather than breaking the deployed service — no credentials needed for that fallback, and no hard failure either way. Anyone who prefers to test with their *own* live session instead of relying on the deployed credentials can clone the repo and follow steps 1–4 above with their own account.
-
-Both are unofficial and reverse-engineered — see [Known Limitations](#known-limitations). **The three-day block, and how it actually resolved:** LinkedIn's classic Voyager `profileView` REST endpoint returned `410 Gone` against a live authenticated session; its Dash sibling and even the plain profile HTML page then hit a hard edge-level block (an infinite `302` self-redirect, reproducible with plain `curl` — no Playwright, no browser fingerprint involved) on every attempt across 2026-08-29 and 2026-08-30, including after a clean 48h account cool-down. That pointed at a broad, account-wide defense with no engineerable way around it. It turned out to be neither: the block was tied to that specific, over-used session cookie (repeated automated-looking traffic against it during three days of testing), not the account itself — a normal, human browser session using the same account worked the entire time. **Refreshing `LINKEDIN_LI_AT`/`LINKEDIN_JSESSIONID` from a live, working browser session cleared the block immediately** (2026-08-31) — the top-card call, the plain profile page, and every Flight-protocol section call all returned real data on the first try with the new cookie. Practical implication: if the deployed credentials ever start hitting this same infinite-redirect signature again, the fix is a fresh cookie pull (README steps above), not a longer wait.
-
-**The old GraphQL "sections" endpoint is separately dead, for an unrelated reason.** Once the session was working, `voyagerIdentityDashProfileComponents` (the query this project originally sourced for experience/education/skills/certifications) returned `HTTP 500` straight from LinkedIn's own backend (`java.lang.RuntimeException: A record in the included list does not have a type`) — not a block, a genuinely retired query. Checking the live profile page's own JS bundles confirmed it: none of them reference that query anymore. LinkedIn has migrated this entire part of the profile page to a React Server Components **"Flight protocol"** rendering system instead (`linkedinFlightProtocol.ts`) — the same system briefly investigated and set aside earlier in this build as a curiosity; it's now the real, current path, and every section (about/experience/education/skills/certifications/languages) is confirmed live through it.
-
-Neither shipped extractor does bot-detection evasion (no proxy rotation, no fingerprint spoofing, no CAPTCHA solving, no headless browser in the request path) — just plain, direct HTTP calls to LinkedIn's own endpoints, authenticated or anonymous.
-
-**Why `playwrightExtractor.ts` isn't deployed to Render:** first and foremost, it isn't allowed to be — the challenge's official clarification email states the solution must be "a purely reverse-engineered solution that directly hits LinkedIn endpoints and does not use a browser" (see [`docs/00_Original_Challenge.md`](docs/00_Original_Challenge.md)). The live/deployed extraction path (`linkedinExtractor.ts`, `publicExtractor.ts`) only ever makes direct HTTP calls to LinkedIn's own endpoints, never browser automation. `playwrightExtractor.ts` was built and kept strictly as a **local-only diagnostic tool** — it's what confirmed the block was happening at LinkedIn's edge/CDN layer rather than being specific to the Voyager API shape (see above), not a candidate for the submitted solution. Independently, it also wouldn't be practical to deploy anyway: headless Chromium needs ~300–400MB RAM on top of the Node process, which risks OOM-crashing Render's free-tier instance (512MB total). Run it locally with `npm run extract:local -- <profile-url>` (needs `npx playwright install chromium` once).
+**On credential lifetime and how this is meant to be evaluated:** the challenge brief explicitly says *"you may use your own LinkedIn credentials in the backend"* — these credentials live only in the deployment's environment variables (Render's, in this submission), never in the evaluator's hands. Whoever tests the live public URL just POSTs a profile URL; they never need to supply `li_at`/`JSESSIONID` themselves. `li_at` is long-lived by design (LinkedIn sets it to persist roughly a year), but if it expires, gets revoked, or the account gets flagged before this is evaluated, the authenticated path fails closed into `publicExtractor` (step 5 above) rather than breaking the deployed service. Anyone who prefers to test with their *own* live session can clone the repo and follow steps 1–4 with their own account. Full detail: [`docs/08_Risk_Limitations.md` §3a](docs/08_Risk_Limitations.md#3a-credential-lifetime--how-this-is-meant-to-be-evaluated).
 
 ## Project structure
 
@@ -229,7 +242,7 @@ All config is loaded once via `src/config/index.ts`, from environment variables 
 npm test
 ```
 
-25 tests: URL validation (valid/invalid/normalization), formatter (null vs. omission convention), centralized error handler (each `AppError` → correct status/shape), and a full integration test that exercises `POST /api/v1/profile` end-to-end through the real stub extractor, Redis cache, and BullMQ queue/worker (requires a reachable Redis, same as running the app).
+83 tests across 12 files: URL validation (valid/invalid/normalization), the Flight-protocol wire-format parser and section parsers, both extractors, formatter (null vs. omission convention), centralized error handler (each `AppError` → correct status/shape), and a full integration test that exercises `POST /api/v1/profile` end-to-end through the real stub extractor, Redis cache, and BullMQ queue/worker (requires a reachable Redis, same as running the app).
 
 ## Deployment
 
@@ -242,12 +255,11 @@ npm start        # node dist/api/server.js
 
 ## Known limitations
 
-Full write-up: [`docs/08_Risk_Limitations.md`](docs/08_Risk_Limitations.md). Highlights:
+Full write-up, including the incident history behind the fixes below: [`docs/08_Risk_Limitations.md`](docs/08_Risk_Limitations.md). Current-state highlights:
 
-- **LinkedIn's extraction surface is genuinely volatile — this build hit two unrelated failure classes in three days, both now resolved, but the underlying volatility isn't something a codebase can fix once and for all.** (1) An edge-level block that looked account-wide (infinite redirect, reproducible even with plain `curl`, surviving a 48h cool-down) turned out to be tied to one over-used session cookie, not the account — refreshing the session cookie from a normal browser session cleared it immediately. (2) Independently, LinkedIn retired the GraphQL query this project used for experience/education/skills/certifications (confirmed: `HTTP 500` straight from LinkedIn's backend, and no current client JS bundle references it anymore) in favor of a React Server Components rendering system, requiring a rewrite of that whole code path (`linkedinFlightProtocol.ts`). See [Extraction layer](#extraction-layer) for the full account of both. Neither shipped extractor does bot-detection evasion (no proxy rotation, no fingerprint spoofing, no CAPTCHA solving). The app handles every failure mode correctly (mapped to the right error code, never fabricated data), but there's no guarantee LinkedIn's frontend build or blocking behavior stays this way — that's the ongoing risk, not a bug in this codebase.
-- **The authenticated and anonymous fallback used to fail into different, misleading HTTP codes for the same underlying block** (`429` vs `422` depending on which path's failure reached the client) — `worker.ts` was silently swallowing the authenticated extractor's real failure reason whenever the anonymous fallback also failed, masking that both paths had actually hit the same LinkedIn block. Fixed: on a double failure, the client now sees the authenticated path's error (the more accurate signal — e.g. an actual block — rather than the anonymous path's generic "unreachable").
-- **Experience/education/skills/certifications/languages/about are now confirmed live-verified** (2026-08-31, see [Extraction layer](#extraction-layer)) via LinkedIn's Flight-protocol component actions — a full rewrite of the parsing layer originally sourced from a different (now-dead) GraphQL query, including correctly attributing grouped multi-position roles (promotions at one company) to their real company rather than mixing up title/company/duration. No language-proficiency field is surfaced (languages return name only). Education's `degree` is LinkedIn's raw combined "Degree, Field of study" string, unsplit.
-- **Fixed 2026-08-31: About and experience/education descriptions came back `null`, and long experience histories were truncated.** Two separate bugs, both in `linkedinFlightProtocol.ts`, found from a real user report against a profile with 19 positions and full paragraph-length descriptions everywhere. (1) LinkedIn renders multi-paragraph text as a nested array of line segments, not one string — the parser only handled the single-string case, so About and every description came back `null` on any profile with real paragraph breaks (most of them). (2) The rsc-action preview response for each section is capped (`paginationNeeded:true` + a "See all" link) and silently drops entries past the first page; on this profile it returned 9 of 15 real positions. Experience now also fetches the linked details page for the complete list, since its own descriptions aren't reliable (see [Extraction layer](#extraction-layer)) — its own description text is dropped and descriptions are still sourced from the preview, matched by (title, dates) rather than by position. Education/skills/certifications/languages didn't hit the same cap on this account and still come from the preview alone; if a future profile has more of those than fit on one page, the same details-page approach is the pattern to extend.
+- **LinkedIn's extraction surface is genuinely volatile.** This build has been through three rounds of real breakage since first deploying — an edge-level block that turned out to be a stale session cookie, a retired GraphQL query replaced with LinkedIn's current rendering system, and two parsing bugs of its own (multi-position grouping, then paragraph-text/pagination). All three are resolved and verified live as of 2026-08-31, but the underlying volatility isn't something a codebase can fix once and for all — see [`docs/08_Risk_Limitations.md` §7](docs/08_Risk_Limitations.md#7-incident-history) for the full account of each. Neither shipped extractor does bot-detection evasion (no proxy rotation, no fingerprint spoofing, no CAPTCHA solving).
+- **Experience/education/skills/certifications/languages/about are confirmed live-verified** via LinkedIn's Flight-protocol component actions. No language-proficiency field is surfaced (languages return name only). Education's `degree` is LinkedIn's raw combined "Degree, Field of study" string, unsplit.
+- **On a double failure** (authenticated extractor fails, then the anonymous fallback also fails), the client sees the authenticated path's error — the more accurate signal, e.g. an actual LinkedIn block — rather than the fallback's generic "unreachable". `worker.ts` used to silently swallow the authenticated failure reason in this case, masking that both paths had hit the same underlying block; fixed.
 - **Render's free tier spins the instance down after inactivity** — the first request after a period of no traffic pays a cold-start delay (tens of seconds) before `/health` or `/api/v1/profile` responds; subsequent requests are fast. Not something this codebase can fix without a paid plan.
 - **Single-region, single-instance deployment** — no horizontal scaling implemented (the architecture supports adding it later; see `docs/03_Architecture.md` §4).
 - **No persistent database** — Redis is a cache with a TTL, not durable storage; a flush means re-fetching on next request.
