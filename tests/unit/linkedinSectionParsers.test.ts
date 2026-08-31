@@ -1,211 +1,127 @@
 import { describe, it, expect } from "vitest";
+import { parseFlightResponse } from "../../src/extraction/implementation/linkedinFlightProtocol.js";
 import {
+  parseAbout,
   parseExperience,
   parseEducation,
   parseSkills,
   parseCertifications,
   parseLanguages,
-  parseBio,
 } from "../../src/extraction/implementation/linkedinSectionParsers.js";
 
-// Fixtures shaped per internal notes' documented
-// JSON paths (sourced from reading that project's actual parsing code) — not live LinkedIn data.
+// Fixtures are real Flight-protocol wire lines (see linkedinFlightProtocol.test.ts), shaped
+// per what was actually captured live against a real account (T12) — not guessed.
+const TEXT_HASH = "85b20fca39223dffe536dd03122e5f56";
+const EXPANDABLE_HASH = "1e9b95c01e7f142c1ba9a289f4714a9c";
 
-function pagedSection(elements: unknown[]) {
-  return {
-    data: {
-      identityDashProfileComponentsBySectionType: {
-        elements: [{ components: { pagedListComponent: { components: { elements } } } }],
-      },
-    },
-  };
+function flight(lines: string[]) {
+  return parseFlightResponse(lines.join("\n"));
 }
 
-function entityElement(entityComponent: Record<string, unknown>) {
-  return { components: { entityComponent } };
-}
+describe("parseAbout", () => {
+  it("returns the About card's text", () => {
+    const parsed = flight([`b:I["${EXPANDABLE_HASH}",[],"default"]`, `1:["$","$Lb",null,{"textProps":{"children":["Building things that matter."]}}]`]);
+    expect(parseAbout(parsed)).toBe("Building things that matter.");
+  });
+});
 
 describe("parseExperience", () => {
-  it("parses a single-position entry", () => {
-    const json = pagedSection([
-      entityElement({
-        titleV2: { text: { text: "Senior Engineer" } },
-        subtitle: { text: "Acme Corp · Full-time" },
-        caption: { text: "Jan 2020 - Present · 3 yrs 4 mos" },
-        metadata: { text: "Bengaluru, India" },
-      }),
+  it("splits 'Company · Employment type' subtitles, keeping just the company", () => {
+    const parsed = flight([
+      `a:I["${TEXT_HASH}",[],"default"]`,
+      `1:["$","p",null,{"className":"c2d1c236","children":["Senior Engineer"]}]`,
+      `2:["$","p",null,{"className":"_61558a10","children":["Acme Corp · Full-time"]}]`,
+      `3:["$","$La",null,{"textProps":{"children":["Jan 2020 - Present · 3 yrs 4 mos"]}}]`,
+      `4:["$","$La",null,{"textProps":{"children":["Bengaluru, India"]}}]`,
     ]);
 
-    expect(parseExperience(json)).toEqual([
-      {
-        title: "Senior Engineer",
-        company: "Acme Corp · Full-time",
-        duration: "Jan 2020 - Present · 3 yrs 4 mos",
-        location: "Bengaluru, India",
-        description: null,
-      },
+    expect(parseExperience(parsed)).toEqual([
+      { title: "Senior Engineer", company: "Acme Corp", duration: "Jan 2020 - Present · 3 yrs 4 mos", location: "Bengaluru, India", description: null },
     ]);
   });
 
-  it("parses a multi-position (grouped promotions) entry, using the outer company and first position", () => {
-    const json = pagedSection([
-      entityElement({
-        titleV2: { text: { text: "Acme Corp" } },
-        subComponents: {
-          components: [
-            {
-              components: {
-                pagedListComponent: {
-                  components: {
-                    elements: [
-                      entityElement({
-                        titleV2: { text: { text: "Staff Engineer" } },
-                        subtitle: { text: "Full-time" },
-                        caption: { text: "Jan 2023 - Present · 1 yr 8 mos" },
-                        metadata: { text: "Remote" },
-                      }),
-                    ],
-                  },
-                },
-              },
-            },
-          ],
-        },
-      }),
+  it("keeps the whole subtitle as company when there's no ' · ' separator", () => {
+    const parsed = flight([`1:["$","p",null,{"className":"c2d1c236","children":["Founding Team"]}]`, `2:["$","p",null,{"className":"_61558a10","children":["WarpVerse X"]}]`]);
+    expect(parseExperience(parsed)[0].company).toBe("WarpVerse X");
+  });
+
+  it("attributes a grouped multi-position header's title to each nested position as company, and drops the header itself", () => {
+    // Real shape (T13): a company header (title = company, subtitle = "Employment type ·
+    // total duration") followed by title-only position entries (no subtitle of their own).
+    const parsed = flight([
+      `a:I["${TEXT_HASH}",[],"default"]`,
+      `1:["$","p",null,{"className":"c2d1c236","children":["Deuex Solutions Pvt. Ltd."]}]`,
+      `2:["$","p",null,{"className":"_61558a10","children":["Full-time · 1 yr 10 mos"]}]`,
+      `3:["$","p",null,{"className":"c2d1c236","children":["FDE"]}]`,
+      `4:["$","$La",null,{"textProps":{"children":["Feb 2025 - Present · 1 yr 7 mos"]}}]`,
+      `5:["$","p",null,{"className":"c2d1c236","children":["DevOps Engineer"]}]`,
+      `6:["$","$La",null,{"textProps":{"children":["Nov 2024 - Present · 1 yr 10 mos"]}}]`,
     ]);
 
-    expect(parseExperience(json)).toEqual([
-      {
-        title: "Staff Engineer",
-        company: "Acme Corp",
-        duration: "Jan 2023 - Present · 1 yr 8 mos",
-        location: "Remote",
-        description: null,
-      },
+    expect(parseExperience(parsed)).toEqual([
+      { title: "FDE", company: "Deuex Solutions Pvt. Ltd.", duration: "Feb 2025 - Present · 1 yr 7 mos", location: null, description: null },
+      { title: "DevOps Engineer", company: "Deuex Solutions Pvt. Ltd.", duration: "Nov 2024 - Present · 1 yr 10 mos", location: null, description: null },
     ]);
   });
 
-  it("throws on an unexpected shape (no pagedListComponent)", () => {
-    expect(() => parseExperience({ data: {} })).toThrow(/Unexpected section response shape/);
+  it("stops attributing the carried-forward company once a genuine single-position entry appears", () => {
+    const parsed = flight([
+      `a:I["${TEXT_HASH}",[],"default"]`,
+      `1:["$","p",null,{"className":"c2d1c236","children":["Deuex Solutions Pvt. Ltd."]}]`,
+      `2:["$","p",null,{"className":"_61558a10","children":["Full-time · 1 yr 10 mos"]}]`,
+      `3:["$","p",null,{"className":"c2d1c236","children":["FDE"]}]`,
+      `4:["$","$La",null,{"textProps":{"children":["Feb 2025 - Present"]}}]`,
+      `5:["$","p",null,{"className":"c2d1c236","children":["Content Creator"]}]`,
+      `6:["$","p",null,{"className":"_61558a10","children":["The Startup Story · Full-time"]}]`,
+    ]);
+
+    const result = parseExperience(parsed);
+    expect(result[0]).toMatchObject({ title: "FDE", company: "Deuex Solutions Pvt. Ltd." });
+    expect(result[1]).toMatchObject({ title: "Content Creator", company: "The Startup Story" });
   });
 });
 
 describe("parseEducation", () => {
   it("parses school/degree/duration, leaving degree unsplit", () => {
-    const json = pagedSection([
-      entityElement({
-        titleV2: { text: { text: "Example University" } },
-        subtitle: { text: "Bachelor's degree, Computer Science" },
-        caption: { text: "2016 - 2020" },
-      }),
+    const parsed = flight([
+      `1:["$","p",null,{"className":"c2d1c236","children":["Example University"]}]`,
+      `2:["$","p",null,{"className":"_61558a10","children":["Bachelor's degree, Computer Science"]}]`,
+      `a:I["${TEXT_HASH}",[],"default"]`,
+      `3:["$","$La",null,{"textProps":{"children":["2016 - 2020"]}}]`,
     ]);
 
-    expect(parseEducation(json)).toEqual([
-      { school: "Example University", degree: "Bachelor's degree, Computer Science", duration: "2016 - 2020" },
-    ]);
+    expect(parseEducation(parsed)).toEqual([{ school: "Example University", degree: "Bachelor's degree, Computer Science", duration: "2016 - 2020" }]);
   });
 });
 
 describe("parseSkills", () => {
-  it("extracts and dedupes skill names across tabbed sections", () => {
-    const json = {
-      data: {
-        identityDashProfileComponentsBySectionType: {
-          elements: [
-            {
-              components: {
-                tabComponent: {
-                  sections: [
-                    {
-                      subComponent: {
-                        components: {
-                          pagedListComponent: {
-                            components: {
-                              elements: [
-                                entityElement({ titleV2: { text: { text: "TypeScript" } } }),
-                                entityElement({ titleV2: { text: { text: "Node.js" } } }),
-                              ],
-                            },
-                          },
-                        },
-                      },
-                    },
-                    {
-                      subComponent: {
-                        components: {
-                          pagedListComponent: {
-                            components: {
-                              elements: [entityElement({ titleV2: { text: { text: "TypeScript" } } })],
-                            },
-                          },
-                        },
-                      },
-                    },
-                  ],
-                },
-              },
-            },
-          ],
-        },
-      },
-    };
-
-    expect(parseSkills(json)).toEqual(["TypeScript", "Node.js"]);
-  });
-
-  it("throws on an unexpected shape (no tabComponent)", () => {
-    expect(() => parseSkills({ data: {} })).toThrow(/Unexpected skills response shape/);
+  it("returns bold-weight text as skill names", () => {
+    const parsed = flight([`a:I["${TEXT_HASH}",[],"default"]`, `1:["$","$La",null,{"textProps":{"children":["TypeScript"],"fontWeight":"bold"}}]`]);
+    expect(parseSkills(parsed)).toEqual(["TypeScript"]);
   });
 });
 
 describe("parseCertifications", () => {
   it("strips the 'Issued ' prefix and keeps date as a raw string", () => {
-    const json = pagedSection([
-      entityElement({
-        titleV2: { text: { text: "AWS Certified Solutions Architect" } },
-        subtitle: { text: "Amazon Web Services (AWS)" },
-        caption: { text: "Issued Jun 2021" },
-      }),
+    const parsed = flight([
+      `1:["$","p",null,{"className":"c2d1c236","children":["AWS Certified Solutions Architect"]}]`,
+      `2:["$","p",null,{"className":"_61558a10","children":["Amazon Web Services (AWS)"]}]`,
+      `a:I["${TEXT_HASH}",[],"default"]`,
+      `3:["$","$La",null,{"textProps":{"children":["Issued Jun 2021"]}}]`,
     ]);
 
-    expect(parseCertifications(json)).toEqual([
-      { name: "AWS Certified Solutions Architect", issuer: "Amazon Web Services (AWS)", date: "Jun 2021" },
-    ]);
+    expect(parseCertifications(parsed)).toEqual([{ name: "AWS Certified Solutions Architect", issuer: "Amazon Web Services (AWS)", date: "Jun 2021" }]);
   });
 });
 
 describe("parseLanguages", () => {
-  it("returns a flat list of names", () => {
-    const json = pagedSection([
-      entityElement({ titleV2: { text: { text: "English" } } }),
-      entityElement({ titleV2: { text: { text: "Hindi" } } }),
+  it("returns a flat list of names from the title/subtitle card shape", () => {
+    const parsed = flight([
+      `1:["$","p",null,{"className":"c2d1c236","children":["English"]}]`,
+      `2:["$","p",null,{"className":"_61558a10","children":["Native or bilingual proficiency"]}]`,
+      `3:["$","p",null,{"className":"c2d1c236","children":["Hindi"]}]`,
     ]);
 
-    expect(parseLanguages(json)).toEqual(["English", "Hindi"]);
-  });
-});
-
-describe("parseBio", () => {
-  it("reads elements[3].topComponents[1]'s text", () => {
-    const json = {
-      data: {
-        identityDashProfileCardsByInitialCards: {
-          elements: [
-            {},
-            {},
-            {},
-            { topComponents: [{}, { components: { textComponent: { text: { text: "Building things." } } } }] },
-          ],
-        },
-      },
-    };
-
-    expect(parseBio(json)).toBe("Building things.");
-  });
-
-  it("fails closed (returns null, never throws) on a missing/reshaped index", () => {
-    expect(parseBio({ data: { identityDashProfileCardsByInitialCards: { elements: [] } } })).toBeNull();
-    expect(parseBio({})).toBeNull();
-    expect(parseBio(null)).toBeNull();
+    expect(parseLanguages(parsed)).toEqual(["English", "Hindi"]);
   });
 });
