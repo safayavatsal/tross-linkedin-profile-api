@@ -1,18 +1,31 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
+// Shape confirmed against a real, live Dash top-card response (T12): top-level
+// body is `{data, included}`, the profile record is picked out of `included` by
+// its `$recipeTypes`, and location is a second-hop lookup through a separate geo
+// entity elsewhere in `included` — see linkedinExtractor.ts's top-of-file comment.
+const GEO_URN = "urn:li:fsd_geo:106164952";
 const TOPCARD_FIXTURE = {
-  elements: [
+  data: {},
+  included: [
+    { entityUrn: GEO_URN, $type: "com.linkedin.voyager.dash.common.Geo", defaultLocalizedName: "Bengaluru, Karnataka, India" },
     {
+      $recipeTypes: ["com.linkedin.voyager.dash.deco.identity.profile.TopCardComplete"],
       firstName: "Jane",
       lastName: "Doe",
       headline: "Senior Engineer",
-      locationName: "Bengaluru, India",
+      location: { countryCode: "IN" },
+      geoLocation: { "*geo": GEO_URN },
       profilePicture: {
-        rootUrl: "https://media.licdn.com/dms/image/",
-        artifacts: [
-          { width: 100, fileIdentifyingUrlPathSegment: "small.jpg" },
-          { width: 400, fileIdentifyingUrlPathSegment: "large.jpg" },
-        ],
+        displayImageReference: {
+          vectorImage: {
+            rootUrl: "https://media.licdn.com/dms/image/",
+            artifacts: [
+              { width: 100, fileIdentifyingUrlPathSegment: "small.jpg" },
+              { width: 400, fileIdentifyingUrlPathSegment: "large.jpg" },
+            ],
+          },
+        },
       },
     },
   ],
@@ -47,7 +60,7 @@ describe("linkedinExtractor", () => {
 
     expect(raw.name).toBe("Jane Doe");
     expect(raw.headline).toBe("Senior Engineer");
-    expect(raw.location).toBe("Bengaluru, India");
+    expect(raw.location).toBe("Bengaluru, Karnataka, India");
     expect(raw.profilePhotoUrl).toBe("https://media.licdn.com/dms/image/large.jpg");
     expect(raw.experience).toBeUndefined();
   });
@@ -91,7 +104,11 @@ describe("linkedinExtractor", () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({ elements: [{ someUnexpectedField: true }] }),
+      json: async () => ({
+        included: [
+          { $recipeTypes: ["com.linkedin.voyager.dash.deco.identity.profile.TopCardComplete"], someUnexpectedField: true },
+        ],
+      }),
     }) as unknown as typeof fetch;
 
     const { linkedinExtractor } = await import("../../src/extraction/implementation/linkedinExtractor.js");
@@ -100,47 +117,23 @@ describe("linkedinExtractor", () => {
     );
   });
 
-  it("fetches sections/bio when the top-card response contains a profile urn, degrading gracefully on partial failure", async () => {
-    const TOPCARD_WITH_URN = {
-      elements: [{ ...TOPCARD_FIXTURE.elements[0], entityUrn: "urn:li:fsd_profile:ACoAAB123" }],
-    };
-    const experienceJson = {
-      data: {
-        identityDashProfileComponentsBySectionType: {
-          elements: [
-            {
-              components: {
-                pagedListComponent: {
-                  components: {
-                    elements: [
-                      {
-                        components: {
-                          entityComponent: {
-                            titleV2: { text: { text: "Senior Engineer" } },
-                            subtitle: { text: "Acme Corp · Full-time" },
-                            caption: { text: "Jan 2020 - Present" },
-                            metadata: { text: "Remote" },
-                          },
-                        },
-                      },
-                    ],
-                  },
-                },
-              },
-            },
-          ],
-        },
-      },
-    };
+  it("fetches Flight-protocol sections after the top-card call, degrading gracefully on partial failure", async () => {
+    const experienceWire = [
+      `a:I["85b20fca39223dffe536dd03122e5f56",[],"default"]`,
+      `1:["$","p",null,{"className":"c2d1c236","children":["Senior Engineer"]}]`,
+      `2:["$","p",null,{"className":"_61558a10","children":["Acme Corp · Full-time"]}]`,
+      `3:["$","$La",null,{"textProps":{"children":["Jan 2020 - Present"]}}]`,
+      `4:["$","$La",null,{"textProps":{"children":["Remote"]}}]`,
+    ].join("\n");
 
     const fetchMock = vi.fn().mockImplementation((url: string) => {
       if (url.includes("voyagerIdentityDashProfiles?")) {
-        return Promise.resolve({ ok: true, status: 200, json: async () => TOPCARD_WITH_URN });
+        return Promise.resolve({ ok: true, status: 200, json: async () => TOPCARD_FIXTURE });
       }
-      if (url.includes("sectionType:experience")) {
-        return Promise.resolve({ ok: true, status: 200, json: async () => experienceJson });
+      if (url.includes("componentId=com.linkedin.sdui.generated.profile.dsl.impl.experienceTopLevelSection")) {
+        return Promise.resolve({ ok: true, status: 200, text: async () => experienceWire });
       }
-      // Every other section/bio call fails — should be omitted, not fail the whole request.
+      // Every other section call fails — should be omitted, not fail the whole request.
       return Promise.resolve({ ok: false, status: 500 });
     });
     global.fetch = fetchMock as unknown as typeof fetch;
@@ -150,14 +143,14 @@ describe("linkedinExtractor", () => {
 
     expect(raw.name).toBe("Jane Doe");
     expect(raw.experience).toEqual([
-      { title: "Senior Engineer", company: "Acme Corp · Full-time", duration: "Jan 2020 - Present", location: "Remote", description: null },
+      { title: "Senior Engineer", company: "Acme Corp", duration: "Jan 2020 - Present", location: "Remote", description: null },
     ]);
     expect(raw.education).toBeUndefined();
     expect(raw.skills).toBeUndefined();
     expect(raw.certifications).toBeUndefined();
     expect(raw.languages).toBeUndefined();
     expect(raw.about).toBeNull();
-    // top-card + bio + experience + education + skills + certifications + languages = 7 calls
+    // top-card + about + experience + education + skills + certifications + languages = 7 calls
     expect(fetchMock).toHaveBeenCalledTimes(7);
   });
 
@@ -176,6 +169,8 @@ describe("linkedinExtractor", () => {
     await expect(linkedinExtractor.fetch("https://www.linkedin.com/in/jane-doe")).rejects.toBeInstanceOf(
       UpstreamRateLimitedError,
     );
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // First call: top-card + about + experience + education + skills + certifications +
+    // languages = 7. Second call is rejected by the pacing gate before any network call.
+    expect(fetchMock).toHaveBeenCalledTimes(7);
   });
 });
