@@ -7,19 +7,15 @@ import {
 } from "../../errors/errorTypes.js";
 import { isRedirectBlock } from "./redirectBlock.js";
 import { msUntilAllowed, recordAttempt, recordBlock } from "./linkedinPacing.js";
+import { topCardUrl } from "./linkedinDashEndpoints.js";
+import { fetchFlightComponent, parseFlightResponse, type FlightSection } from "./linkedinFlightProtocol.js";
 import {
-  topCardUrl,
-  profileComponentsBySectionTypeUrl,
-  profileTabInitialCardsUrl,
-  findProfileUrnId,
-} from "./linkedinDashEndpoints.js";
-import {
+  parseAbout,
   parseExperience,
   parseEducation,
   parseSkills,
   parseCertifications,
   parseLanguages,
-  parseBio,
 } from "./linkedinSectionParsers.js";
 import type { ProfileExtractor } from "../ProfileExtractor.interface.js";
 import type { RawProfileData } from "../../types/profile.types.js";
@@ -28,11 +24,23 @@ import type { RawProfileData } from "../../types/profile.types.js";
 // `identity/profiles/{id}/profileView` REST endpoint is dead (410 Gone, confirmed
 // during this build). This targets its still-alive sibling instead: the Voyager
 // "Dash" layer's decorated top-card finder — found via internal ticket T2
-// (verified from that project's source, not just README claims). If the
-// top-card response yields a profile urn, also fetches experience/education/skills/
-// certifications/languages/bio — field mappings sourced from T11's read of
-// that project's actual parsing code (linkedinSectionParsers.ts), not guessed. None of
-// this has been confirmed live against our own account (T7 remains blocked).
+// (verified from that project's source, not just README claims). Deeper
+// sections (about/experience/education/skills/certifications/languages) come from a
+// completely different system — LinkedIn's "Flight protocol" component actions (see
+// linkedinFlightProtocol.ts) — since the old Voyager GraphQL section query this
+// project used before is dead too (confirmed live: HTTP 500 from LinkedIn's own
+// backend, T12).
+//
+// Top-card response shape (fields below) is now confirmed against a real, live
+// response (T7/T12): the top-level body is `{data, included}`, not `{elements}` —
+// `included` is a flat bag of entities, and the actual profile record is the one
+// whose `$recipeTypes` names `TopCardComplete`. `firstName`/`headline` are plain
+// fields on that entity, but a human-readable location isn't: `locationName`/
+// `geoLocationName` don't exist on this decoration, only `location.countryCode`
+// (e.g. "IN") and a `geoLocation["*geo"]` urn pointing at a *separate* entity
+// elsewhere in `included` whose `defaultLocalizedName` holds the real string
+// (e.g. "Mumbai, Maharashtra, India"). The photo is nested one level deeper than
+// guessed too: `profilePicture.displayImageReference.vectorImage.{rootUrl,artifacts}`.
 // Unofficial/reverse-engineered (docs/08_Risk_Limitations.md) — can change or get
 // rate-limited/flagged at any time.
 type DashEntity = Record<string, unknown>;
@@ -41,19 +49,32 @@ function publicIdentifierFromUrl(normalizedUrl: string): string {
   return new URL(normalizedUrl).pathname.replace(/^\/in\//, "").replace(/\/$/, "");
 }
 
-function pickImageUrl(picture: unknown): string | null {
-  const p = picture as { rootUrl?: string; artifacts?: { width: number; fileIdentifyingUrlPathSegment: string }[] } | undefined;
-  if (!p?.rootUrl || !p.artifacts?.length) return null;
-  const largest = [...p.artifacts].sort((a, b) => b.width - a.width)[0];
-  return p.rootUrl + largest.fileIdentifyingUrlPathSegment;
+function findTopCardEntity(included: DashEntity[]): DashEntity | undefined {
+  return included.find((e) => (e.$recipeTypes as string[] | undefined)?.some((r) => r.includes("TopCardComplete")));
 }
 
-// Field names are our best-effort reading of typical Voyager/Dash naming
-// conventions (mirrors the old Profile entity) — unverified until T7's live
-// test. If LinkedIn's actual TopCardComplete shape differs, this throws with
-// the real top-level keys so T7 can fix the mapping from real evidence.
-function extractTopCard(elements: DashEntity[]): RawProfileData {
-  const e = elements[0];
+function resolveLocationName(entity: DashEntity, included: DashEntity[]): string | null {
+  const geoLocation = entity.geoLocation as { ["*geo"]?: string } | undefined;
+  if (geoLocation?.["*geo"]) {
+    const geoEntity = included.find((e) => e.entityUrn === geoLocation["*geo"]);
+    const name = geoEntity?.defaultLocalizedName as string | undefined;
+    if (name) return name;
+  }
+  const location = entity.location as { countryCode?: string } | undefined;
+  return location?.countryCode ?? null;
+}
+
+function pickImageUrl(picture: unknown): string | null {
+  const vectorImage = (
+    picture as { displayImageReference?: { vectorImage?: { rootUrl?: string; artifacts?: { width: number; fileIdentifyingUrlPathSegment: string }[] } } } | undefined
+  )?.displayImageReference?.vectorImage;
+  if (!vectorImage?.rootUrl || !vectorImage.artifacts?.length) return null;
+  const largest = [...vectorImage.artifacts].sort((a, b) => b.width - a.width)[0];
+  return vectorImage.rootUrl + largest.fileIdentifyingUrlPathSegment;
+}
+
+function extractTopCard(included: DashEntity[]): RawProfileData {
+  const e = findTopCardEntity(included);
   if (!e) throw new ProfilePrivateOrUnreachableError();
 
   const firstName = (e.firstName as string) ?? "";
@@ -68,7 +89,7 @@ function extractTopCard(elements: DashEntity[]): RawProfileData {
   return {
     name,
     headline: (e.headline as string) ?? null,
-    location: (e.locationName as string) ?? (e.geoLocationName as string) ?? null,
+    location: resolveLocationName(e, included),
     about: null,
     profilePhotoUrl: pickImageUrl(e.profilePicture),
   };
@@ -88,25 +109,6 @@ function authHeaders(normalizedUrl: string): Record<string, string> {
     "user-agent":
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   };
-}
-
-// Best-effort follow-up call for one profile section (experience/education/.../bio) once the
-// top-card call already succeeded. Any failure here (network, block signal, unexpected shape)
-// just means that one section stays unpopulated — never fails the whole request (see T8/T11).
-async function fetchDashJson(url: string, headers: Record<string, string>): Promise<unknown> {
-  let res: Response;
-  try {
-    res = await fetch(url, { headers });
-  } catch (err) {
-    if (isRedirectBlock(err)) recordBlock();
-    throw err;
-  }
-  if (res.status === 401 || res.status === 403 || res.status === 999) {
-    recordBlock();
-    throw new Error(`HTTP ${res.status}`);
-  }
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
 }
 
 export const linkedinExtractor: ProfileExtractor = {
@@ -141,34 +143,28 @@ export const linkedinExtractor: ProfileExtractor = {
     }
     if (!res.ok) throw new UnknownExtractionError(`LinkedIn returned HTTP ${res.status}`);
 
-    const body = (await res.json()) as { elements?: DashEntity[] };
-    const profile = extractTopCard(body.elements ?? []);
-
-    // The section/bio calls need the profile's internal urn id, only present inside the
-    // top-card response. If we can't find it, we still have a valid top-card result — return
-    // it as-is rather than failing the whole request over the additional sections.
-    const profileUrnId = findProfileUrnId(body);
-    if (!profileUrnId) return profile;
+    const body = (await res.json()) as { included?: DashEntity[] };
+    const profile = extractTopCard(body.included ?? []);
 
     // Fired together, not paced 10s apart like separate profile requests: this mirrors how a
-    // real browser loads a profile page (one navigation triggers several near-simultaneous XHR
-    // calls) — spacing these out would look more automated, not less. The pacing gate above
-    // already governs the rate of *separate profile fetches*; this is one logical fetch.
-    const [bio, experience, education, skills, certifications, languages] = await Promise.allSettled([
-      fetchDashJson(profileTabInitialCardsUrl(profileUrnId), headers).then(parseBio),
-      fetchDashJson(profileComponentsBySectionTypeUrl(profileUrnId, "experience"), headers).then(parseExperience),
-      fetchDashJson(profileComponentsBySectionTypeUrl(profileUrnId, "education"), headers).then(parseEducation),
-      fetchDashJson(profileComponentsBySectionTypeUrl(profileUrnId, "skills"), headers).then(parseSkills),
-      fetchDashJson(profileComponentsBySectionTypeUrl(profileUrnId, "certifications"), headers).then(parseCertifications),
-      fetchDashJson(profileComponentsBySectionTypeUrl(profileUrnId, "languages"), headers).then(parseLanguages),
-    ]);
+    // real browser loads a profile page (one navigation triggers several near-simultaneous
+    // requests) — spacing these out would look more automated, not less. The pacing gate above
+    // already governs the rate of *separate profile fetches*; this is one logical fetch. Any
+    // individual section failing (wrong componentId after LinkedIn's next rebuild, transient
+    // 500, etc.) just means that one section stays unpopulated — never fails the whole request.
+    const sections = ["about", "experience", "education", "skills", "certifications", "languages"] as const;
+    const [about, experience, education, skills, certifications, languages] = await Promise.allSettled(
+      sections.map((section: FlightSection) =>
+        fetchFlightComponent(publicIdentifier, section).then(parseFlightResponse),
+      ),
+    );
 
-    if (bio.status === "fulfilled" && bio.value) profile.about = bio.value;
-    if (experience.status === "fulfilled") profile.experience = experience.value;
-    if (education.status === "fulfilled") profile.education = education.value;
-    if (skills.status === "fulfilled") profile.skills = skills.value;
-    if (certifications.status === "fulfilled") profile.certifications = certifications.value;
-    if (languages.status === "fulfilled") profile.languages = languages.value;
+    if (about.status === "fulfilled") profile.about = parseAbout(about.value);
+    if (experience.status === "fulfilled") profile.experience = parseExperience(experience.value);
+    if (education.status === "fulfilled") profile.education = parseEducation(education.value);
+    if (skills.status === "fulfilled") profile.skills = parseSkills(skills.value);
+    if (certifications.status === "fulfilled") profile.certifications = parseCertifications(certifications.value);
+    if (languages.status === "fulfilled") profile.languages = parseLanguages(languages.value);
 
     return profile;
   },
