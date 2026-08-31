@@ -1,8 +1,8 @@
-// Diagnostic-only, local-run tool for internal ticket T12 — NOT part of the deployed
-// extraction path. Fetches the top-card (Voyager Dash) and every profile section (Flight
-// protocol) for a real profile and prints each raw response, for debugging when LinkedIn's
-// next frontend rebuild inevitably rotates the Flight componentId naming or CSS-in-JS
-// class markers this project's parsers key off of (see linkedinFlightProtocol.ts).
+// Diagnostic-only, local-run tool — NOT part of the deployed extraction path. Fetches the
+// top-card (Voyager Dash) and every profile section (Flight protocol) for a real profile and
+// prints each raw response, for debugging when LinkedIn's next frontend rebuild inevitably
+// rotates the Flight componentId naming or CSS-in-JS class markers this project's parsers key
+// off of (see linkedinFlightProtocol.ts).
 //
 // Usage: npm run probe:linkedin -- https://www.linkedin.com/in/<slug>
 import { config } from "../src/config/index.js";

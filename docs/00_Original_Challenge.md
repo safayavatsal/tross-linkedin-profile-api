@@ -45,5 +45,5 @@ HTTP calls to LinkedIn's own endpoints (the Voyager "Dash" API and the public JS
 respectively) — no browser automation anywhere in the live request path. `playwrightExtractor.ts`
 (headless Chromium) exists only as a **local-only, never-deployed** diagnostic tool used to confirm
 that LinkedIn's block was happening at the edge/CDN layer rather than being a Voyager-API-specific
-issue (see `README.md` "Extraction layer" and T10)
+issue (see `README.md` "Extraction layer")
 — it is not part of, and was never intended to be part of, the submitted solution.

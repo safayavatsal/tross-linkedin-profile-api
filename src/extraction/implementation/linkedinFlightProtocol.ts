@@ -270,7 +270,8 @@ export interface FlightCardEntry {
 // to, in the same relative order as the entries, with no id tying the two together —
 // this maps them onto entries positionally (1st description to 1st entry, ...), which
 // is correct as long as every entry up to the last one with a description also has
-// one. A deliberate, documented tradeoff.
+// one. A deliberate, documented tradeoff — see the description-sourcing note on
+// parseExperience in linkedinSectionParsers.ts for how experience works around it.
 export function extractCardEntries(parsed: FlightParsed): FlightCardEntry[] {
   const classified = [...parsed.chunks.entries()]
     .map(([id, value]) => {

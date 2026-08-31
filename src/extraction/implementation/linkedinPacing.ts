@@ -1,8 +1,7 @@
-// Self-imposed request pacing for outbound LinkedIn calls, per the internal
-// investigation into why linkedinExtractor was getting escalating blocks:
-// Prior research indicated LinkedIn's blocking as account-level and
-// behavioral (request volume/timing), not fingerprint-based — so the fix is
-// disciplined pacing, not evasion. This is a process-local floor to stop this
+// Self-imposed request pacing for outbound LinkedIn calls: LinkedIn's blocking of
+// linkedinExtractor during this build behaved as account-level and behavioral
+// (request volume/timing), not fingerprint-based — so the fix is disciplined
+// pacing, not evasion. This is a process-local floor to stop this
 // server hammering LinkedIn during a bad patch; it is deliberately much shorter
 // than the 24-48h account-level cool-down we observed by hand during
 // development (a hard-coded day-long block would make the deployed demo look

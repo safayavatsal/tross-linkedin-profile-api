@@ -23,8 +23,7 @@ import type { RawProfileData } from "../../types/profile.types.js";
 // Real extraction via LinkedIn's internal "Voyager" web API. The classic
 // `identity/profiles/{id}/profileView` REST endpoint is dead (410 Gone, confirmed
 // during this build). This targets its still-alive sibling instead: the Voyager
-// "Dash" layer's decorated top-card finder — found via internal ticket T2
-// (verified from that project's source, not just README claims). Deeper
+// "Dash" layer's decorated top-card finder (T2). Deeper
 // sections (about/experience/education/skills/certifications/languages) come from a
 // completely different system — LinkedIn's "Flight protocol" component actions (see
 // linkedinFlightProtocol.ts) — since the old Voyager GraphQL section query this
